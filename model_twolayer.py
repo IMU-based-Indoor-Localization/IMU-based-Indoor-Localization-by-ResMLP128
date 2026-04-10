@@ -159,8 +159,13 @@ class PoseClassifier(nn.Module):
                  dropout: float = 0.5,
                  pooling_type: str = 'mean'):
         super(PoseClassifier, self).__init__()
+
+        # [수정] Reduce 직후 input_norm 추가
+        # extractor 출력의 스케일이 클 경우 첫 번째 Linear의 logit이 폭발적으로
+        # 커져 CrossEntropy가 비정상적으로 높아지는 문제를 방지한다.
         self.net = nn.Sequential(
             Reduce('b l f -> b f', pooling_type),
+            nn.LayerNorm(feature_len),              # 입력 스케일 안정화
             *[nn.Sequential(
                 nn.Linear(feature_len, feature_len),
                 nn.LayerNorm(feature_len),
@@ -168,7 +173,10 @@ class PoseClassifier(nn.Module):
                 nn.Dropout(p=dropout)
             ) for _ in range(layer_num)]
         )
+        # bias=0, xavier 초기화로 초기 logit이 균등하도록 보장
         self.classifier = nn.Linear(feature_len, num_classes)
+        nn.init.zeros_(self.classifier.bias)
+        nn.init.xavier_uniform_(self.classifier.weight)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.classifier(self.net(x))

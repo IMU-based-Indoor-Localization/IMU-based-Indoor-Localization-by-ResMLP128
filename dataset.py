@@ -52,7 +52,7 @@ TARGET_COLS = ["target_delta_x", "target_delta_y", "target_delta_z"]
 LABEL_COL = "placement_label"
 
 # placement_label → class index
-LABEL_MAP = {-1: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
+LABEL_MAP = {-1: 0, 0: 6, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
 IDX_TO_LABEL = {v: k for k, v in LABEL_MAP.items()}
 CLASS_NAMES = ["noise", "handbag", "handheld", "pocket",
                "running", "slow_walking", "trolley"]
@@ -269,6 +269,12 @@ class OXIODDataset(Dataset):
     def __getitem__(self, idx: int):
         return self._dataset[idx]
 
+
+# ---------------------------------------------------------------------------
+# 파일 단위 분리 헬퍼
+# ---------------------------------------------------------------------------
+
+
 # ---------------------------------------------------------------------------
 # DataLoader 팩토리
 # ---------------------------------------------------------------------------
@@ -287,20 +293,12 @@ def build_dataloaders(
 ) -> dict:
     """
     이미 분리된 파일 경로 리스트를 받아 DataLoader를 생성합니다.
+    train 통계가 val/test 정규화에 자동 적용됩니다.
 
-    주의: 이 함수는 파일을 자동으로 분리하지 않습니다.
-          파일 분리가 필요하면 split_files_by_session()을 먼저 호출하세요.
-
-    전형적인 사용 패턴:
-        # 1) 파일 단위로 분리
-        train_files, val_files, test_files = split_files_by_session("data/")
-
-        # 2) DataLoader 생성 (train 통계가 val/test 정규화에 자동 적용됨)
-        loaders = build_dataloaders(train_files, val_files, test_files)
-
-        # 3) 학습에 사용
-        for imu, target, label in loaders["train"]:
-            ...
+    Args:
+        train_paths  : train CSV 경로 리스트 또는 디렉터리
+        val_paths    : val   CSV 경로 리스트 또는 디렉터리
+        test_paths   : test  CSV 경로 리스트 또는 디렉터리 (없으면 생략)
 
     Returns:
         {

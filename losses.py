@@ -21,6 +21,8 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
 # ---------------------------------------------------------------------------
 # 1. Gaussian NLL Regression Loss
 # ---------------------------------------------------------------------------
@@ -44,11 +46,31 @@ class GaussianNLLLoss(nn.Module):
         σ² 대신 log(σ²)를 예측하면 항상 양수가 보장되고 학습이 안정적.
     """
 
-    def __init__(self, reduction: str = "mean", eps: float = -10.0):
+    def __init__(self,
+                 reduction: str   = "mean",
+                 log_var_min: float =  0.0,
+                 log_var_max: float =  3.0):
+        """
+        Args:
+            log_var_min : log σ² 하한 클램프.
+                          -3.0 → σ² ≥ e^{-3} ≈ 0.05  (너무 확신하지 않도록)
+                          원래 -10.0은 너무 넓어 variance collapse 유발.
+            log_var_max : log σ² 상한 클램프.
+                          3.0 → σ² ≤ e^3 ≈ 20  (너무 불확실하지 않도록)
+                          상한이 없으면 모델이 log_var를 키워 손실을 회피.
+
+        [variance collapse란]
+        GaussianNLL = 0.5*exp(-log_var)*err² + 0.5*log_var 에서
+        모델이 log_var → -∞ 로 학습하면 첫 항이 폭발적으로 커지지만,
+        err²가 매우 작으면 전체 손실은 오히려 음수가 됨.
+        → 모델이 예측을 개선하는 대신 '자신감'을 높이는 방향으로만 학습.
+        양방향 클램프로 log_var 범위를 제한하면 이를 방지.
+        """
         super().__init__()
         assert reduction in ("mean", "sum", "none")
-        self.reduction = reduction
-        self.eps = eps  # log_var 최솟값 클리핑
+        self.reduction   = reduction
+        self.log_var_min = log_var_min
+        self.log_var_max = log_var_max
 
     def forward(
         self,
@@ -59,7 +81,8 @@ class GaussianNLLLoss(nn.Module):
         """
         L = 0.5 * exp(-log_var) * (y - y_hat)² + 0.5 * log_var
         """
-        log_var = torch.clamp(log_var, min=self.eps)
+        # 양방향 클램프: variance collapse(하한) + uncertainty inflation(상한) 방지
+        log_var = torch.clamp(log_var, min=self.log_var_min, max=self.log_var_max)
 
         loss = 0.5 * torch.exp(-log_var) * (target - y_hat) ** 2 \
              + 0.5 * log_var              # [B, D]
@@ -69,6 +92,8 @@ class GaussianNLLLoss(nn.Module):
         elif self.reduction == "sum":
             return loss.sum()
         return loss  # [B, D]
+
+
 # ---------------------------------------------------------------------------
 # 2. Pose Classification Loss
 # ---------------------------------------------------------------------------
@@ -149,11 +174,13 @@ class CombinedLoss(nn.Module):
         class_weights:       Optional[torch.Tensor] = None,
         label_smoothing:     float = 0.0,
         ignore_noise_class:  bool  = False,
-        nll_eps:             float = -10.0,
+        log_var_min:         float = -3.0,
+        log_var_max:         float =  3.0,
     ):
         super().__init__()
         self.cls_weight = cls_weight
-        self.reg_loss   = GaussianNLLLoss(eps=nll_eps)
+        self.reg_loss   = GaussianNLLLoss(log_var_min=log_var_min,
+                                          log_var_max=log_var_max)
         self.cls_loss   = PoseLoss(
             class_weights      = class_weights,
             label_smoothing    = label_smoothing,
@@ -174,9 +201,12 @@ class CombinedLoss(nn.Module):
         total = l_reg + self.cls_weight * l_cls
 
         detail = {
-            "reg" : l_reg.item(),
-            "cls" : l_cls.item(),
-            "total": total.item(),
+            "reg"         : l_reg.item(),
+            "cls"         : l_cls.item(),
+            "total"       : total.item(),
+            # log_var 통계 — variance collapse 모니터링용
+            "log_var_mean": log_var.mean().item(),
+            "log_var_min" : log_var.min().item(),
         }
         return total, detail
 
@@ -188,7 +218,7 @@ class CombinedLoss(nn.Module):
 def compute_class_weights(
     labels: torch.Tensor,
     num_classes: int = 7,
-    method: str = "inv_freq",
+    method: str = "sqrt_inv",
 ) -> torch.Tensor:
     """
     레이블 텐서로부터 클래스 가중치를 계산합니다.
@@ -196,37 +226,58 @@ def compute_class_weights(
     Args:
         labels      : 전체 데이터셋 레이블 [N] (클래스 인덱스)
         num_classes : 클래스 수 (OXIOD: 7)
-        method      : 'inv_freq'  — 빈도 역수 가중치 (희귀 클래스 ↑)
-                      'sqrt_inv'  — sqrt(빈도 역수) (완만한 보정)
-                      'effective' — Effective Number of Samples 방법
+        method      : 'sqrt_inv'  — sqrt(빈도 역수). 기본값. [권장]
+                                    극단적 가중치 없이 불균형 완화.
+                      'inv_freq'  — 빈도 역수. 불균형이 심할 때 지배 클래스의
+                                    weight가 거의 0이 되어 gradient 消失 위험.
+                      'effective' — Effective Number of Samples 방법.
+
+    [inv_freq 사용 시 주의]
+    훈련 데이터에 한 클래스(예: running=4)가 99% 이상이면:
+        weight[4] ≈ 1/N ≈ 0  →  class 4 샘플의 gradient ≈ 0
+        →  분류기가 class 4를 전혀 학습하지 못함  →  acc = 0
+    이 경우 sqrt_inv 또는 effective를 사용하세요.
 
     Returns:
         weights: FloatTensor [num_classes]
-
-    Example:
-        all_labels = torch.cat([label for _, _, label in train_dataset])
-        weights = compute_class_weights(all_labels, num_classes=7)
-        criterion = CombinedLoss(class_weights=weights.to(device))
     """
     counts = torch.zeros(num_classes, dtype=torch.float32)
     for c in range(num_classes):
         counts[c] = (labels == c).sum().float()
 
-    # 0인 클래스 처리 (데이터에 없는 클래스)
-    counts = counts.clamp(min=1.0)
+    # 데이터에 없는 클래스 → weight=0 (학습 불가 클래스는 손실에서 제외)
+    missing = (counts == 0).nonzero(as_tuple=True)[0].tolist()
+    if missing:
+        from dataset import CLASS_NAMES
+        names = [CLASS_NAMES[c] for c in missing]
+        print(f"[compute_class_weights] 경고: 학습 데이터에 없는 클래스 {names}. "
+              f"해당 클래스 weight=0으로 설정합니다 (손실에서 제외).")
+    counts_safe = counts.clamp(min=1.0)
+
+    # 지배 클래스 경고
+    dominant_ratio = counts_safe.max() / counts_safe.sum()
+    if dominant_ratio > 0.8 and method == "inv_freq":
+        print(f"[compute_class_weights] 경고: 지배 클래스 비율 {dominant_ratio:.1%}. "
+              f"inv_freq 방식은 지배 클래스의 gradient를 거의 0으로 만듭니다. "
+              f"method='sqrt_inv' 사용을 강력 권장합니다.")
 
     if method == "inv_freq":
-        weights = 1.0 / counts
+        weights = 1.0 / counts_safe
     elif method == "sqrt_inv":
-        weights = 1.0 / counts.sqrt()
+        weights = 1.0 / counts_safe.sqrt()
     elif method == "effective":
         beta = 0.9999
-        weights = (1 - beta) / (1 - beta ** counts)
+        weights = (1 - beta) / (1 - beta ** counts_safe)
     else:
         raise ValueError(f"알 수 없는 method: {method}")
 
-    # 평균이 1이 되도록 정규화
-    weights = weights / weights.mean()
+    # 데이터 없는 클래스는 weight=0으로 강제 설정
+    weights[counts == 0] = 0.0
+
+    # 존재하는 클래스만으로 평균 정규화
+    present = counts > 0
+    if present.any():
+        weights[present] = weights[present] / weights[present].mean()
     return weights
 
 

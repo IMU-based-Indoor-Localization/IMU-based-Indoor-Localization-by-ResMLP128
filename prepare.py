@@ -5,8 +5,8 @@ import numpy as np
 from collections import defaultdict
 
 # 설정
-RAW_DATA_DIR = "C:\Users\13224\Downloads\LLIO_p\dataset"
-OUT_DATA_DIR = "C:\Users\13224\Downloads\LLIO_p\split_dataset"      # 분할된 데이터가 저장될 폴더
+RAW_DATA_DIR = "dataset"
+OUT_DATA_DIR = "data"      # 분할된 데이터가 저장될 폴더
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
 SEED = 42

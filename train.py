@@ -33,7 +33,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from dataset import OXIODDataset, build_dataloaders, split_files_by_session, CLASS_NAMES, NUM_CLASSES
+from dataset import OXIODDataset, build_dataloaders, CLASS_NAMES, NUM_CLASSES
 from losses import CombinedLoss, GaussianNLLLoss, compute_class_weights
 from model_twolayer import TwoLayerModel
 
@@ -45,9 +45,9 @@ from model_twolayer import TwoLayerModel
 DEFAULT_CONFIG = {
     # ---- 데이터 ----
     #  train/val/test 디렉터리를 직접 지정
-    "train_dir"  : "data/train",
-    "val_dir"    : "data/val",
-    "test_dir"   : "data/test",
+    "train_dir"  : "dataset",
+    "val_dir"    : "val_dataset",
+    "test_dir"   : "test_dataset",
     "window_len"   : 100,
     "train_stride" : 10,
     "eval_stride"  : 50,
@@ -82,34 +82,34 @@ DEFAULT_CONFIG = {
 
     # ---- 손실 ----
     "loss": {
-        "cls_weight"        : 0.3,    # 분류 손실 가중치
+        "cls_weight"        : 1.0,    # reg와 cls를 동등하게 (0.3은 cls 신호 부족)
         "label_smoothing"   : 0.1,
-        "ignore_noise_class": False,  # True: noise 클래스(0) 분류 손실 무시
-        "use_class_weights" : True,   # 클래스 불균형 보정
+        "ignore_noise_class": False,
+        "use_class_weights" : True,
     },
 
     # ---- 최적화 ----
     "optimizer": {
         "name"        : "AdamW",
         "lr"          : 1e-3,
-        "weight_decay": 1e-4,
+        "weight_decay": 1e-3,   # overfitting 방지 (1e-4 → 1e-3)
     },
     "scheduler": {
-        "name"      : "CosineAnnealingLR",   # 'CosineAnnealingLR' | 'ReduceLROnPlateau' | 'StepLR'
-        "T_max"     : 100,                   # CosineAnnealingLR 전용
-        "eta_min"   : 1e-6,                  # CosineAnnealingLR 전용
-        "patience"  : 10,                    # ReduceLROnPlateau 전용
-        "step_size" : 30,                    # StepLR 전용
-        "gamma"     : 0.5,                   # StepLR / ReduceLROnPlateau 전용
+        "name"      : "CosineAnnealingLR",
+        "T_max"     : 100,
+        "eta_min"   : 1e-6,
+        "patience"  : 10,
+        "step_size" : 30,
+        "gamma"     : 0.5,
     },
 
     # ---- 학습 ----
     "epochs"        : 100,
-    "early_stopping": 20,       # val loss 개선 없으면 몇 epoch 후 종료 (None: 비활성)
-    "grad_clip"     : 1.0,      # gradient clipping (None: 비활성)
+    "early_stopping": 20,
+    "grad_clip"     : 1.0,
 
     # ---- 저장 / 로깅 ----
-    "output_dir"    : "runs/exp01",
+    "output_dir"    : "runs/exp02",
     "save_every"    : 10,       # N epoch마다 체크포인트 저장
     "log_interval"  : 50,       # N step마다 train loss 출력
 }
@@ -411,12 +411,9 @@ def train(cfg: dict):
     # ---- 파일 분리 & 데이터셋 ----
     logger.info("데이터셋 로딩 중...")
 
-    train_dir = cfg.get("train_dir", "data/split/train")
-    val_dir   = cfg.get("val_dir", "data/split/val")
-    test_dir  = cfg.get("test_dir", "data/split/test")
-    train_files = cfg["train_dir"]
-    val_files   = cfg["val_dir"]
-    test_files  = cfg.get("test_dir", None)
+    train_files = cfg.get("train_dir", "dataset")
+    val_files   = cfg.get("val_dir",   "val_dataset")
+    test_files  = cfg.get("test_dir",  None)
 
     loaders = build_dataloaders(
         train_paths  = train_files,
