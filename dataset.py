@@ -1,3 +1,6 @@
+import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 """
 dataset.py
 ----------
@@ -36,15 +39,40 @@ from torch.utils.data import Dataset, DataLoader, ConcatDataset
 # 상수
 # ---------------------------------------------------------------------------
 
-# 사용할 IMU 채널 (6-axis: acc + gyro)
-IMU_COLS = [
+# 사용할 IMU 채널 (14-axis: acc + gyro + gravity + attitude[sin/cos 변환])
+# [결정 1] gravity 3채널은 "중력 방향 = 절대 수직" 기준을 제공해
+#          pitch/roll 모호성을 해결한다.
+# [결정 2] attitude (iOS CMAttitude, world-frame 기준)를 추가해 yaw 모호성도 해결.
+#          handbag/pocket 등 폰이 회전하는 placement에서 결정적.
+# [결정 3] roll/yaw는 ±π wraparound가 있어 raw로 넣으면 학습 저해.
+#          → sin/cos로 분해해 연속적 feature로 변환.
+#          pitch는 π/2 근처에 고정되어 wrap 없음 → raw 사용.
+# LLIO 논문 원본: 6-axis (world-frame acc + body-frame gyro)
+# 세션 간 일반화가 가장 좋음 — attitude 절대값 의존 없음
+IMU_COLS_6 = [
     "user_acc_x(m/s^2)", "user_acc_y(m/s^2)", "user_acc_z(m/s^2)",
     "rotation_rate_x(rad/s)", "rotation_rate_y(rad/s)", "rotation_rate_z(rad/s)",
 ]
 
-# 추가 센서 채널 (선택 사용)
-GRAVITY_COLS = ["gravity_x(m/s^2)", "gravity_y(m/s^2)", "gravity_z(m/s^2)"]
+# 확장 14채널 (gravity + attitude sin/cos 추가)
+IMU_COLS_14 = [
+    "user_acc_x(m/s^2)", "user_acc_y(m/s^2)", "user_acc_z(m/s^2)",
+    "rotation_rate_x(rad/s)", "rotation_rate_y(rad/s)", "rotation_rate_z(rad/s)",
+    "gravity_x(m/s^2)", "gravity_y(m/s^2)", "gravity_z(m/s^2)",
+    "att_roll_sin", "att_roll_cos",
+    "attitude_pitch(rad)",
+    "att_yaw_sin",  "att_yaw_cos",
+]
+
+# 기본값: 14채널 (gravity + attitude 포함 → orientation 정보 제공)
+IMU_COLS = IMU_COLS_14
+
+# 추가 센서 채널 (선택 사용 — input_cols로 직접 넘길 때 참조용)
+GRAVITY_COLS  = ["gravity_x(m/s^2)", "gravity_y(m/s^2)", "gravity_z(m/s^2)"]
 ATTITUDE_COLS = ["attitude_roll(rad)", "attitude_pitch(rad)", "attitude_yaw(rad)"]
+
+# attitude → sin/cos 파생 feature 이름
+ATTITUDE_DERIVED_COLS = ["att_roll_sin", "att_roll_cos", "att_yaw_sin", "att_yaw_cos"]
 
 # 회귀 타깃
 TARGET_COLS = ["target_delta_x", "target_delta_y", "target_delta_z"]
@@ -52,7 +80,12 @@ TARGET_COLS = ["target_delta_x", "target_delta_y", "target_delta_z"]
 LABEL_COL = "placement_label"
 
 # placement_label → class index
-LABEL_MAP = {-1: 0, 0: 6, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
+# OXIOD raw label 체계:
+#   -1: noise(학습 제외용), 0: trolley, 1: handbag, 2: handheld,
+#   3: pocket, 4: running, 5: slow walking
+# class index(학습용)는 0~6으로 재배치: trolley를 마지막(6)에 둠.
+# 예상 밖의 값이 들어오면 LABEL_MAP.get(l, 0) 에 의해 noise(0)로 처리.
+LABEL_MAP = {-1: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
 IDX_TO_LABEL = {v: k for k, v in LABEL_MAP.items()}
 CLASS_NAMES = ["noise", "handbag", "handheld", "pocket",
                "running", "slow_walking", "trolley"]
@@ -92,14 +125,44 @@ class OXIODSingleFileDataset(Dataset):
         target_cols: Optional[List[str]] = None,
         normalize: bool = True,
         precomputed_stats: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        augment_yaw: bool = False,
+        augment_noise: bool = False,
+        noise_std: float = 0.05,    # 정규화 후 기준 std. 너무 크면 학습 불안정.
+        augment_scale: bool = False,
+        scale_range: Tuple[float, float] = (0.8, 1.25),
     ):
         self.csv_path   = Path(csv_path)
         self.window_len = window_len
         self.stride     = stride
         self.input_cols = input_cols if input_cols is not None else IMU_COLS
         self.target_cols = target_cols if target_cols is not None else TARGET_COLS
+        self.augment_yaw   = augment_yaw
+        self.augment_noise = augment_noise
+        self.noise_std     = noise_std
+        self.augment_scale = augment_scale
+        self.scale_range   = scale_range
 
         df = pd.read_csv(self.csv_path)
+
+        # [추가] attitude → sin/cos 파생 feature 생성
+        # wraparound(±π)가 있는 roll/yaw만 변환. pitch는 π/2 근처 고정이라 생략.
+        # [중요] yaw는 session-relative로 정규화한다:
+        #   iOS CMAttitude(xArbitraryZVertical)의 X축은 "세션 시작 시점의
+        #   임의 수평 방향"이라 파일마다 yaw=0 기준이 다르다. 원본 그대로
+        #   넣으면 모델이 학습한 "yaw 값 → world 방향" 매핑이 다른 세션에
+        #   일반화되지 않아 체계적 편향(궤적이 통째로 회전)을 일으킨다.
+        #   → 각 파일 첫 샘플의 yaw를 빼서 "세션 시작 = 0" 기준으로 통일.
+        if "attitude_roll(rad)" in df.columns:
+            df["att_roll_sin"] = np.sin(df["attitude_roll(rad)"].values)
+            df["att_roll_cos"] = np.cos(df["attitude_roll(rad)"].values)
+        if "attitude_yaw(rad)" in df.columns:
+            yaw_abs = df["attitude_yaw(rad)"].values
+            yaw_rel = yaw_abs - yaw_abs[0]
+            # [-π, π] 범위로 wrap
+            yaw_rel = np.arctan2(np.sin(yaw_rel), np.cos(yaw_rel))
+            df["att_yaw_sin"]  = np.sin(yaw_rel)
+            df["att_yaw_cos"]  = np.cos(yaw_rel)
+
         self._validate_columns(df)
 
         # ---- 레이블 변환 ----
@@ -109,6 +172,12 @@ class OXIODSingleFileDataset(Dataset):
         # ---- 입력 / 타깃 numpy 배열 ----
         self.imu_data    = df[self.input_cols].values.astype(np.float32)   # [T, C]
         self.target_data = df[self.target_cols].values.astype(np.float32)  # [T, 3]
+
+        # ---- 이상치 클리핑 ----
+        # 100Hz 기준 1프레임=0.01초, 사람 최대 속도 ~10m/s → 0.1m/frame
+        # 실제 데이터에 -46.5m 같은 이상치가 존재하여 MSE를 왜곡함
+        DELTA_CLIP = 0.1
+        self.target_data = np.clip(self.target_data, -DELTA_CLIP, DELTA_CLIP)
 
         # ---- 정규화 ----
         if normalize:
@@ -138,15 +207,70 @@ class OXIODSingleFileDataset(Dataset):
         start = self.indices[idx]
         end   = start + self.window_len
 
-        # imu: [C, window_len]  ← 모델 입력 형식에 맞게 transpose
-        imu = torch.from_numpy(self.imu_data[start:end].T.copy())
+        # imu: [C, window_len]
+        imu_np    = self.imu_data[start:end].T.copy()           # [C, W]
+        target_np = self.target_data[start:end].sum(axis=0).copy()  # [3]
 
-        # target: 윈도우 내 delta의 합 → 윈도우 전체 변위
-        target = torch.from_numpy(
-            self.target_data[start:end].sum(axis=0).copy()
-        )
+        # [추가] random horizontal (yaw) rotation augmentation
+        # 채널 순서(IMU_COLS):
+        #   0-2: user_acc x,y,z       (world frame → X,Y 회전)
+        #   3-5: rotation_rate x,y,z  (body frame  → 그대로)
+        #   6-8: gravity x,y,z        (world frame → X,Y 회전)
+        #   9-10: att_roll_sin, cos   (roll은 yaw 무관 → 그대로)
+        #   11:   attitude_pitch      (pitch는 yaw 무관 → 그대로)
+        #   12-13: att_yaw_sin, cos   (yaw 자체 → theta 만큼 회전)
+        # 6채널(legacy) 및 14채널(현재) 모두 지원.
+        if self.augment_yaw:
+            theta = float(np.random.uniform(-np.pi, np.pi))
+            c, s_ = np.cos(theta), np.sin(theta)
+            R2 = np.array([[c, -s_], [s_, c]], dtype=np.float32)  # 2-D 회전
 
-        # label: 윈도우 중간 시점의 레이블 사용 (다수결도 가능하지만 단순화)
+            n_ch = imu_np.shape[0]
+            if n_ch == 6:
+                # 6채널: user_acc(ch0-2)는 world frame → 타겟과 함께 회전 필수
+                # rotation_rate(ch3-5)는 body frame → 그대로 (비선형 변환 필요해 생략)
+                imu_np[0:2] = R2 @ imu_np[0:2]
+            elif n_ch >= 14:
+                # 14(+2)채널 yaw augmentation (세계 수평면 기준 회전):
+                #   user_acc x,y (world-frame) → 회전
+                imu_np[0:2] = R2 @ imu_np[0:2]
+                #   rotation_rate (body frame) → 그대로
+                #   gravity (body frame, iOS CMMotionManager) → 그대로
+                #   att_roll_sin/cos (ch9,10), attitude_pitch (ch11) → 그대로 (yaw 무관)
+                #   att_yaw_sin/cos (ch12,13) → 회전
+                imu_np[12:14] = R2 @ imu_np[12:14]
+                #   pc1_x, pc1_y (ch14,15) → world-frame 벡터이므로 함께 회전
+                # (PC1 채널이 있는 경우 여기서 회전할 수 있으나, 현재는 14ch 기준)
+
+            # target X,Y 회전, Z 그대로
+            target_np[:2] = R2 @ target_np[:2]
+            target_np = target_np.astype(np.float32)
+
+        # 속도(보행 속도) 스케일 augmentation
+        # acc/gyro 신호와 타깃 변위를 동일 배율로 스케일링해 걷는 속도 차이를 모사.
+        # gravity/attitude 채널은 orientation 정보이므로 변경하지 않음.
+        if self.augment_scale:
+            scale = float(np.random.uniform(self.scale_range[0], self.scale_range[1]))
+            imu_np[0:6] = imu_np[0:6] * scale   # acc(0-2) + gyro(3-5)
+            target_np   = target_np   * scale
+
+        # IMU 센서 노이즈 augmentation
+        # 정규화된 imu_np에 Gaussian noise를 추가해 센서 개체차/환경 변화를 모사.
+        # att sin/cos 채널(9,10,12,13)은 [-1,1] 범위라 noise 후 재정규화.
+        if self.augment_noise:
+            noise = np.random.randn(*imu_np.shape).astype(np.float32) * self.noise_std
+            imu_np = imu_np + noise
+            # sin/cos 채널 재정규화 (14채널일 때만, 채널 9-10, 12-13이 존재할 때)
+            if imu_np.shape[0] >= 14:
+                for c0, c1 in [(9, 10), (12, 13)]:
+                    norm = np.sqrt(imu_np[c0]**2 + imu_np[c1]**2 + 1e-8)
+                    imu_np[c0] /= norm
+                    imu_np[c1] /= norm
+
+        imu    = torch.from_numpy(imu_np)
+        target = torch.from_numpy(target_np)
+
+        # label: 윈도우 중간 시점
         label = torch.tensor(self.labels[start + self.window_len // 2],
                              dtype=torch.long)
 
@@ -203,9 +327,19 @@ class OXIODDataset(Dataset):
         normalize: bool = True,
         precomputed_stats: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         file_glob: str = "*.csv",
+        augment_yaw: bool = False,
+        augment_noise: bool = False,
+        noise_std: float = 0.05,
+        augment_scale: bool = False,
+        scale_range: Tuple[float, float] = (0.8, 1.25),
     ):
-        self.input_cols  = input_cols  or IMU_COLS
-        self.target_cols = target_cols or TARGET_COLS
+        self.input_cols    = input_cols  or IMU_COLS
+        self.target_cols   = target_cols or TARGET_COLS
+        self.augment_yaw   = augment_yaw
+        self.augment_noise = augment_noise
+        self.noise_std     = noise_std
+        self.augment_scale = augment_scale
+        self.scale_range   = scale_range
 
         # ---- 파일 목록 정리 ----
         if isinstance(csv_paths, (str, Path)) and Path(csv_paths).is_dir():
@@ -232,6 +366,11 @@ class OXIODDataset(Dataset):
                 target_cols       = self.target_cols,
                 normalize         = normalize,
                 precomputed_stats = precomputed_stats,
+                augment_yaw       = self.augment_yaw,
+                augment_noise     = self.augment_noise,
+                noise_std         = self.noise_std,
+                augment_scale     = self.augment_scale,
+                scale_range       = self.scale_range,
             )
             for p in csv_paths
         ]
@@ -251,6 +390,17 @@ class OXIODDataset(Dataset):
         all_data = []
         for p in csv_paths:
             df = pd.read_csv(p)
+            # [추가] attitude 파생 feature (IMU_COLS 와 동일 로직)
+            # yaw는 session-relative 로 정규화 (OXIODSingleFileDataset과 동일)
+            if "attitude_roll(rad)" in df.columns:
+                df["att_roll_sin"] = np.sin(df["attitude_roll(rad)"].values)
+                df["att_roll_cos"] = np.cos(df["attitude_roll(rad)"].values)
+            if "attitude_yaw(rad)" in df.columns:
+                yaw_abs = df["attitude_yaw(rad)"].values
+                yaw_rel = yaw_abs - yaw_abs[0]
+                yaw_rel = np.arctan2(np.sin(yaw_rel), np.cos(yaw_rel))
+                df["att_yaw_sin"]  = np.sin(yaw_rel)
+                df["att_yaw_cos"]  = np.cos(yaw_rel)
             all_data.append(df[self.input_cols].values.astype(np.float32))
         concat = np.concatenate(all_data, axis=0)
         mean = concat.mean(axis=0)
@@ -280,16 +430,20 @@ class OXIODDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 def build_dataloaders(
-    train_paths:  List[Union[str, Path]],
-    val_paths:    List[Union[str, Path]],
-    test_paths:   Optional[List[Union[str, Path]]] = None,
-    window_len:   int  = 100,
-    train_stride: int  = 10,
-    eval_stride:  int  = 50,
-    batch_size:   int  = 256,
-    num_workers:  int  = 4,
-    normalize:    bool = True,
-    input_cols:   Optional[List[str]] = None,
+    train_paths:   List[Union[str, Path]],
+    val_paths:     List[Union[str, Path]],
+    test_paths:    Optional[List[Union[str, Path]]] = None,
+    window_len:    int  = 100,
+    train_stride:  int  = 10,
+    eval_stride:   int  = 50,
+    batch_size:    int  = 256,
+    num_workers:   int  = 4,
+    normalize:     bool = True,
+    input_cols:    Optional[List[str]] = None,
+    augment_noise: bool  = False,
+    noise_std:     float = 0.02,
+    augment_scale: bool  = False,
+    scale_range:   Tuple[float, float] = (0.8, 1.25),
 ) -> dict:
     """
     이미 분리된 파일 경로 리스트를 받아 DataLoader를 생성합니다.
@@ -310,11 +464,16 @@ def build_dataloaders(
     """
     # train Dataset → 정규화 통계 계산
     train_ds = OXIODDataset(
-        csv_paths  = train_paths,
-        window_len = window_len,
-        stride     = train_stride,
-        normalize  = normalize,
-        input_cols = input_cols,
+        csv_paths     = train_paths,
+        window_len    = window_len,
+        stride        = train_stride,
+        normalize     = normalize,
+        input_cols    = input_cols,
+        augment_yaw   = True,
+        augment_noise = augment_noise,
+        noise_std     = noise_std,
+        augment_scale = augment_scale,
+        scale_range   = scale_range,
     )
     stats = train_ds.get_stats() if normalize else None
 
