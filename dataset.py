@@ -25,6 +25,7 @@ OXIOD placement_label 매핑:
 import os
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -66,21 +67,6 @@ NUM_CLASSES = len(CLASS_NAMES)
 class OXIODSingleFileDataset(Dataset):
     """
     하나의 CSV 파일에서 슬라이딩 윈도우 샘플을 생성합니다.
-
-    Args:
-        csv_path      : CSV 파일 경로
-        window_len    : 윈도우 크기 (timestep 수), 기본 100
-        stride        : 윈도우 이동 간격, 기본 10
-        input_cols    : 사용할 입력 컬럼 리스트 (기본: 6-axis IMU)
-        target_cols   : 회귀 타깃 컬럼 (기본: delta x/y/z)
-        normalize     : True이면 입력을 z-score 정규화 (mean/std는 파일 단위)
-        precomputed_stats : (mean, std) 튜플. normalize=True이고 외부 통계를 
-                            적용할 때 사용 (e.g. train set 통계를 val/test에 적용)
-
-    Returns (per item):
-        imu    : FloatTensor [input_channel, window_len]
-        target : FloatTensor [3]  — cumulative delta position
-        label  : LongTensor  []   — class index (0~6)
     """
 
     def __init__(
@@ -137,23 +123,13 @@ class OXIODSingleFileDataset(Dataset):
     def __getitem__(self, idx: int):
         start = self.indices[idx]
         end   = start + self.window_len
-
-        # imu: [C, window_len]  ← 모델 입력 형식에 맞게 transpose
         imu = torch.from_numpy(self.imu_data[start:end].T.copy())
-
-        # target: 윈도우 내 delta의 합 → 윈도우 전체 변위
-        target = torch.from_numpy(
-            self.target_data[start:end].sum(axis=0).copy()
-        )
-
-        # label: 윈도우 중간 시점의 레이블 사용 (다수결도 가능하지만 단순화)
+        target = torch.from_numpy(self.target_data[start:end].sum(axis=0).copy())
         label = torch.tensor(self.labels[start + self.window_len // 2],
                              dtype=torch.long)
-
         return imu, target, label
 
     def get_stats(self) -> Tuple[np.ndarray, np.ndarray]:
-        """정규화에 사용된 (mean, std) 반환. train set 통계를 val/test에 전달할 때 사용."""
         if self.mean is None:
             raise RuntimeError("normalize=False로 생성된 Dataset입니다.")
         return self.mean, self.std
@@ -166,31 +142,6 @@ class OXIODSingleFileDataset(Dataset):
 class OXIODDataset(Dataset):
     """
     여러 CSV 파일을 하나의 Dataset으로 합칩니다.
-
-    사용 예:
-        train_ds = OXIODDataset(
-            csv_paths=["data/running_1.csv", "data/handheld_1.csv", ...],
-            window_len=100,
-            stride=10,
-            normalize=True,
-        )
-        val_ds = OXIODDataset(
-            csv_paths=["data/running_2.csv"],
-            window_len=100,
-            stride=50,
-            normalize=True,
-            precomputed_stats=train_ds.get_stats(),  # train 통계 재사용
-        )
-
-    Args:
-        csv_paths         : CSV 파일 경로 리스트 또는 디렉터리 경로 (str/Path)
-        window_len        : 윈도우 크기
-        stride            : 윈도우 이동 간격
-        input_cols        : 입력 컬럼 목록
-        target_cols       : 타깃 컬럼 목록
-        normalize         : 정규화 여부
-        precomputed_stats : 외부 (mean, std). None이면 전체 데이터로 계산
-        file_glob         : csv_paths가 디렉터리일 때 파일 패턴 (기본 "*.csv")
     """
 
     def __init__(
@@ -222,7 +173,6 @@ class OXIODDataset(Dataset):
         if normalize and precomputed_stats is None:
             precomputed_stats = self._compute_global_stats(csv_paths)
 
-        # ---- 개별 Dataset 생성 후 합치기 ----
         sub_datasets = [
             OXIODSingleFileDataset(
                 csv_path          = p,
@@ -239,15 +189,10 @@ class OXIODDataset(Dataset):
         self._dataset = ConcatDataset(sub_datasets)
         self._stats   = precomputed_stats
         self.num_files = len(sub_datasets)
-        self.file_lengths = [len(ds) for ds in sub_datasets]
-
-        print(f"[OXIODDataset] 로드된 파일 수: {self.num_files}")
-        print(f"[OXIODDataset] 총 샘플 수   : {len(self._dataset)}")
 
     def _compute_global_stats(
         self, csv_paths: List[Path]
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """전체 데이터의 컬럼별 mean/std 계산."""
         all_data = []
         for p in csv_paths:
             df = pd.read_csv(p)
@@ -258,7 +203,6 @@ class OXIODDataset(Dataset):
         return mean, std
 
     def get_stats(self) -> Tuple[np.ndarray, np.ndarray]:
-        """정규화 통계 반환 (val/test set 생성 시 전달)."""
         if self._stats is None:
             raise RuntimeError("normalize=False로 생성된 Dataset입니다.")
         return self._stats
@@ -268,6 +212,74 @@ class OXIODDataset(Dataset):
 
     def __getitem__(self, idx: int):
         return self._dataset[idx]
+
+
+# ---------------------------------------------------------------------------
+# 파일 분할 유틸리티
+# ---------------------------------------------------------------------------
+
+def split_files_by_session(
+    data_dir:   Union[str, Path],
+    val_ratio:  float = 0.15,
+    test_ratio: float = 0.15,
+    seed:       int   = 42,
+    file_glob:  str   = "*.csv",
+) -> Tuple[List[Path], List[Path], List[Path]]:
+    """
+    클래스(자세)별 불균형과 파일별 길이(샘플 수) 차이를 모두 고려하여
+    Train / Val / Test 세트로 안전하게 분리합니다.
+    """
+    all_files = sorted(Path(data_dir).glob(file_glob))
+    if not all_files:
+        raise ValueError(f"CSV 파일을 찾을 수 없습니다: {data_dir}/{file_glob}")
+
+    rng = np.random.default_rng(seed)
+    class_groups = defaultdict(list)
+    
+    for f in all_files:
+        with open(f, 'r', encoding='utf-8') as file:
+            try:
+                # 헤더 제외한 줄 수 카운트
+                num_lines = sum(1 for _ in file) - 1
+            except:
+                continue
+            
+        c_name = "unknown"
+        for cls in CLASS_NAMES:
+            if cls in f.name.lower() or cls in str(f.parent).lower():
+                c_name = cls
+                break
+        class_groups[c_name].append({'path': f, 'length': num_lines})
+
+    train_files, val_files, test_files = [], [], []
+
+    for c_name, items in class_groups.items():
+        if not items: continue
+        rng.shuffle(items)
+        total_len = sum(item['length'] for item in items)
+        target_val_len = total_len * val_ratio
+        target_test_len = total_len * test_ratio
+        
+        cur_val_len, cur_test_len = 0, 0
+        
+        for item in items:
+            if cur_test_len < target_test_len:
+                test_files.append(item['path'])
+                cur_test_len += item['length']
+            elif cur_val_len < target_val_len:
+                val_files.append(item['path'])
+                cur_val_len += item['length']
+            else:
+                train_files.append(item['path'])
+                
+    if len(train_files) == 0:
+        # 데이터가 너무 적을 경우 val/test에서 하나씩 가져옴
+        if val_files: train_files.append(val_files.pop())
+        elif test_files: train_files.append(test_files.pop())
+    
+    print(f"[Split] Train:{len(train_files)}, Val:{len(val_files)}, Test:{len(test_files)}")
+    return train_files, val_files, test_files
+
 
 # ---------------------------------------------------------------------------
 # DataLoader 팩토리
@@ -287,30 +299,7 @@ def build_dataloaders(
 ) -> dict:
     """
     이미 분리된 파일 경로 리스트를 받아 DataLoader를 생성합니다.
-
-    주의: 이 함수는 파일을 자동으로 분리하지 않습니다.
-          파일 분리가 필요하면 split_files_by_session()을 먼저 호출하세요.
-
-    전형적인 사용 패턴:
-        # 1) 파일 단위로 분리
-        train_files, val_files, test_files = split_files_by_session("data/")
-
-        # 2) DataLoader 생성 (train 통계가 val/test 정규화에 자동 적용됨)
-        loaders = build_dataloaders(train_files, val_files, test_files)
-
-        # 3) 학습에 사용
-        for imu, target, label in loaders["train"]:
-            ...
-
-    Returns:
-        {
-            "train" : DataLoader,
-            "val"   : DataLoader,
-            "test"  : DataLoader  (test_paths가 None이면 미포함),
-            "stats" : (mean, std) ← train 정규화 통계 (추론 시 재사용)
-        }
     """
-    # train Dataset → 정규화 통계 계산
     train_ds = OXIODDataset(
         csv_paths  = train_paths,
         window_len = window_len,
@@ -320,7 +309,6 @@ def build_dataloaders(
     )
     stats = train_ds.get_stats() if normalize else None
 
-    # val/test는 train 통계로 정규화 (필수)
     val_ds = OXIODDataset(
         csv_paths         = val_paths,
         window_len        = window_len,
@@ -354,25 +342,10 @@ def build_dataloaders(
     return loaders
 
 
-# ---------------------------------------------------------------------------
-# 빠른 검증
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
+    # 빠른 테스트용
     import sys
-
-    csv_file = sys.argv[1] if len(sys.argv) > 1 else "running_1.csv"
-
-    ds = OXIODSingleFileDataset(csv_file, window_len=100, stride=10)
-    print(f"샘플 수: {len(ds)}")
-
-    imu, target, label = ds[0]
-    print(f"imu   : {imu.shape}   dtype={imu.dtype}")     # [6, 100]
-    print(f"target: {target.shape} dtype={target.dtype}")  # [3]
-    print(f"label : {label.item()} ({CLASS_NAMES[label.item()]})")
-
-    loader = DataLoader(ds, batch_size=32, shuffle=True)
-    batch_imu, batch_target, batch_label = next(iter(loader))
-    print(f"\nBatch imu   : {batch_imu.shape}")     # [32, 6, 100]
-    print(f"Batch target: {batch_target.shape}")    # [32, 3]
-    print(f"Batch label : {batch_label.shape}")     # [32]
+    if len(sys.argv) > 1:
+        csv_file = sys.argv[1]
+        ds = OXIODSingleFileDataset(csv_file)
+        print(f"Loaded {len(ds)} samples")
