@@ -1,16 +1,10 @@
-from numpy.core.fromnumeric import transpose
-from numpy.lib.arraypad import pad
-from numpy.lib.arraysetops import isin
+import numpy as np
+import torch
 import torch.nn as nn
 from torch.nn.modules import dropout
 from torch.nn.modules.activation import ReLU
 from torch.nn.modules.batchnorm import BatchNorm1d
-
-import torch
-
-
 from einops.layers.torch import *
-
 
 class Affine(nn.Module):
     def __init__(self, dim):
@@ -107,10 +101,10 @@ class MLPExtractor(nn.Module):
     def __initialization(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_normal(m.weight)
-                nn.init.xavier_normal(m.bias)
+                nn.init.xavier_normal_(m.weight)
+                nn.init.xavier_normal_(m.bias)
             elif isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal(m.weight)
+                nn.init.kaiming_normal_(m.weight)
             elif isinstance(m, nn.BatchNorm1d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
@@ -126,9 +120,7 @@ class MLPReg(nn.Module):
                  dropout=0.5):
         super(MLPReg, self).__init__()
 
-        # self.in_dim = in_dim
-        # self.in_num = in_num
-        self.in_size = in_size  # self.in_dim * self.in_num
+        self.in_size = in_size
         self.out_size = out_dim * 2
 
         self.resmlp_list = list()
@@ -151,7 +143,6 @@ class MLPReg(nn.Module):
         self.output_layer = nn.Linear(int(inner_dims[-1]), int(self.out_size))
 
         self.active_func = active_fun
-        # self.bn = nn.BatchNorm1d()
         self.dropout = nn.Dropout(dropout)
 
         self.__initialization()
@@ -159,7 +150,6 @@ class MLPReg(nn.Module):
     def forward(self, x):
         out = x.reshape([x.size(0), 1, x.size(1)])
 
-        # processing
         for layer in self.resmlp_list:
             out = layer(out)
 
@@ -167,7 +157,6 @@ class MLPReg(nn.Module):
 
         for i in range(len(self.mlp_list)):
             out = self.mlp_list[i](out)
-
             out = self.active_func(out)
             out = self.bn_list[i](out)
             out = self.dropout(out)
@@ -196,7 +185,7 @@ class MLPCombineNet(nn.Module):
                 "res_layer_num": 4,
                 "reg_res_layer_num": 4,
                 "inner_dim": [60, 30],
-                "active_function": "ReLU",  # "GELU",
+                "active_function": "ReLU",
                 "reg_inner_dims": [80, 50, 20],
                 "batch_norm": None,
                 "dropout": 0.5,
@@ -215,6 +204,7 @@ class MLPCombineNet(nn.Module):
             self.active_function = nn.PReLU()
         else:
             print('active function name unknown[{0}]'.format(self.active_func_name))
+        
         self.extractor = MLPExtractor(in_channel_len=para["in_channel_len"],
                                       in_channel_dim=para["in_channel_dim"],
                                       out_channel=para["out_channel"],
@@ -223,7 +213,6 @@ class MLPCombineNet(nn.Module):
                                       active_func=self.active_function)
 
         self.reg_input_size = int(para["out_channel"] * para["input_len"] / para["in_channel_len"])
-        print('reg input size:', self.reg_input_size)
         self.reg = MLPReg(
             self.reg_input_size,
             active_fun=self.active_function,
