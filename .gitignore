@@ -1,0 +1,16 @@
+.env             # API 키, 비밀번호 등이 들어있는 환경변수 파일
+secret.json      # 보안이 필요한 설정 파일
+
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+*.csv
+*.json
+*.log
+
+.DS_Store
+Thumbs.db
