@@ -30,81 +30,127 @@ class TLIONpySingleDataset(Dataset):
 
         # 1. NPY 파일 로드 (Shape: [N, 17])
         data = np.load(self.npy_path)
-        
-        # 2. JSON 명세에 따른 컬럼 슬라이싱
-        gyr_world = data[:, 1:4]
-        acc_world = data[:, 4:7]
+
+        # 2. 컬럼 슬라이싱
+        # TLIO 입력은 "윈도우 시작 기준 local gravity-aligned frame"으로 만들 것이므로
+        # 여기서는 raw body IMU를 그대로 들고 있고, __getitem__에서 window별 변환을 수행한다.
+        self.gyr_body = data[:, 1:4].astype(np.float32)
+        self.acc_body = data[:, 4:7].astype(np.float32)
         self.quat_data = data[:, 7:11].astype(np.float32)
         self.pos_data = data[:, 11:14].astype(np.float32)
 
-        # 3. [핵심] World 프레임을 Device(Body) 프레임으로 역회전
-        rotations = R.from_quat(self.quat_data)
-        rotations_inv = rotations.inv()
-        
-        gyr_body = rotations_inv.apply(gyr_world)
-        acc_body = rotations_inv.apply(acc_world)
-        
-        # 4. 신경망 입력을 위한 6ch 구성 (acc + gyro)
-        self.imu_data = np.concatenate([acc_body, gyr_body], axis=1).astype(np.float32)
-
-        # 5. 정규화 (train 통계 우선 사용)
+        # 3. 정규화 통계
+        self.normalize = normalize
         if normalize:
             if precomputed_stats is not None:
                 self.mean, self.std = precomputed_stats
             else:
-                self.mean = self.imu_data.mean(axis=0)
-                self.std = self.imu_data.std(axis=0) + 1e-8
-            self.imu_data = (self.imu_data - self.mean) / self.std
+                # 단일 파일 fallback: 같은 gravity-aligned 입력 기준으로 통계 계산
+                self.mean, self.std = self._compute_local_stats()
         else:
             self.mean, self.std = None, None
 
-        # 6. 슬라이딩 윈도우 인덱스
-        T = len(self.imu_data)
+        # 4. 슬라이딩 윈도우 인덱스
+        T = len(self.acc_body)
         self.indices = list(range(0, T - window_len, stride))
 
     def __len__(self) -> int:
         return len(self.indices)
+    def _window_to_gravity_aligned(self, start: int, end: int) -> np.ndarray:
+        """
+        [start:end] 구간의 raw body IMU를
+        '윈도우 시작점 yaw 기준 local gravity-aligned frame'으로 변환.
+        반환 shape: [window_len, 6]  (acc_xyz + gyro_xyz)
+        """
+        acc_body = self.acc_body[start:end]   # [L, 3]
+        gyr_body = self.gyr_body[start:end]   # [L, 3]
+
+        # 각 시점 body -> world 회전
+        R_all = R.from_quat(self.quat_data[start:end]).as_matrix().astype(np.float32)  # [L, 3, 3]
+
+        # 윈도우 시작점 yaw만 추출
+        r_start = R.from_quat(self.quat_data[start])
+        yaw0 = r_start.as_euler('zyx', degrees=False)[0]
+        R_yaw_inv = R.from_euler('z', yaw0).inv().as_matrix().astype(np.float32)  # [3, 3]
+
+        # body -> world
+        acc_world = np.einsum('tij,tj->ti', R_all, acc_body)  # [L, 3]
+        gyr_world = np.einsum('tij,tj->ti', R_all, gyr_body)  # [L, 3]
+
+        # world -> local gravity-aligned (시작 yaw 제거)
+        acc_ga = (R_yaw_inv @ acc_world.T).T  # [L, 3]
+        gyr_ga = (R_yaw_inv @ gyr_world.T).T  # [L, 3]
+
+        imu_np = np.concatenate([acc_ga, gyr_ga], axis=1).astype(np.float32)  # [L, 6]
+        return imu_np
+
+    def _compute_local_stats(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        단일 파일 fallback용 통계 계산.
+        gravity-aligned window 입력 기준으로 mean/std 계산한다.
+        """
+        ch_sum = np.zeros(6, dtype=np.float64)
+        ch_sumsq = np.zeros(6, dtype=np.float64)
+        count = 0
+
+        for start in range(0, len(self.acc_body) - self.window_len, self.stride):
+            end = start + self.window_len
+            imu_win = self._window_to_gravity_aligned(start, end)  # [L, 6]
+
+            ch_sum += imu_win.sum(axis=0)
+            ch_sumsq += (imu_win ** 2).sum(axis=0)
+            count += imu_win.shape[0]
+
+        mean = ch_sum / max(count, 1)
+        var = ch_sumsq / max(count, 1) - mean ** 2
+        std = np.sqrt(np.maximum(var, 1e-8)).astype(np.float32)
+
+        return mean.astype(np.float32), std + 1e-8
+    
 
     def __getitem__(self, idx: int):
         start = self.indices[idx]
         end = start + self.window_len
 
-        # [1] Input: 6ch IMU 데이터 [6, window_len]
-        imu_np = self.imu_data[start:end].T.copy()
-        
+        # [1] Input: window별 local gravity-aligned IMU [window_len, 6]
+        imu_np = self._window_to_gravity_aligned(start, end)
+
         # [2] Target: Gravity-Aligned Delta Position
         pos_start = self.pos_data[start]
         pos_end = self.pos_data[end]
-        
-        # World 좌표계 기준 변위
-        delta_p_world = pos_end - pos_start 
-        
-        # 윈도우 시작점의 방향에서 Yaw(수평 회전)만 추출하여 수평 좌표계 형성
+
+        # World 기준 변위
+        delta_p_world = pos_end - pos_start
+
+        # 윈도우 시작점 yaw만 제거한 local gravity-aligned target
         r_start = R.from_quat(self.quat_data[start])
-        yaw, pitch, roll = r_start.as_euler('zyx', degrees=False)
-        R_yaw_inv = R.from_euler('z', yaw).inv().as_matrix()
-        
-        # 타겟 변위를 시작점의 수평 좌표계로 회전 (Z축인 중력방향은 유지됨)
-        target_np = R_yaw_inv @ delta_p_world 
-        
-    # [3] Augmentation (Yaw Rotation)
-        if self.is_train: 
+        yaw0 = r_start.as_euler('zyx', degrees=False)[0]
+        R_yaw_inv = R.from_euler('z', yaw0).inv().as_matrix().astype(np.float32)
+
+        target_np = (R_yaw_inv @ delta_p_world).astype(np.float32)
+
+        # [3] Augmentation (Yaw Rotation) - train일 때만
+        # local gravity-aligned frame에서 수평 회전 augmentation
+        if self.is_train:
             theta = float(np.random.uniform(-np.pi, np.pi))
             c, s_ = np.cos(theta), np.sin(theta)
             R2 = np.array([[c, -s_], [s_, c]], dtype=np.float32)
-            
-            # Accel, Gyro 수평 회전
-            imu_np[0:2] = R2 @ imu_np[0:2]
-            imu_np[3:5] = R2 @ imu_np[3:5]
-            
-            # Target 변위 수평 회전
+
+            # acc x,y 회전
+            imu_np[:, 0:2] = imu_np[:, 0:2] @ R2.T
+            # gyro x,y 회전
+            imu_np[:, 3:5] = imu_np[:, 3:5] @ R2.T
+            # target x,y 회전
             target_np[:2] = R2 @ target_np[:2]
 
-        # if문이 끝나고 바로 return으로 넘어가야 합니다.
-        return torch.from_numpy(imu_np), torch.from_numpy(target_np.astype(np.float32))
+        # [4] Normalize
+        if self.normalize:
+            imu_np = (imu_np - self.mean) / self.std
 
-    def get_stats(self) -> Tuple[np.ndarray, np.ndarray]:
-        return self.mean, self.std
+        # [5] 모델 입력 형태 [6, window_len]
+        imu_np = imu_np.T.copy()
+
+        return torch.from_numpy(imu_np), torch.from_numpy(target_np.astype(np.float32))
 
 
 # ---------------------------------------------------------------------------
@@ -133,8 +179,11 @@ class TLIOMultiDataset(Dataset):
 
         # 정규화 통계 계산 (train의 경우 전체 데이터 기준)
         if normalize and precomputed_stats is None:
-            precomputed_stats = self._compute_global_stats(npy_paths)
-
+            precomputed_stats = self._compute_global_stats(
+                npy_paths=npy_paths,
+                window_len=window_len,
+                stride=stride,
+            )
         # 개별 파일별 Dataset 생성
         sub_datasets = [
             TLIONpySingleDataset(
@@ -153,27 +202,59 @@ class TLIOMultiDataset(Dataset):
         
         print(f"[{base_dir.name}] 로드된 파일 수: {len(sub_datasets)} | 총 샘플 수: {len(self._dataset)}")
 
-    def _compute_global_stats(self, npy_paths: List[Path]) -> Tuple[np.ndarray, np.ndarray]:
-        """전체 데이터의 컬럼별 mean/std 계산"""
-        all_imu = []
+    def _compute_global_stats(
+        self,
+        npy_paths: List[Path],
+        window_len: int,
+        stride: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
+
+        ch_sum = np.zeros(6, dtype=np.float64)
+        ch_sumsq = np.zeros(6, dtype=np.float64)
+        count = 0
+
         print("전체 데이터 정규화 통계 계산 중...")
+
         for p in npy_paths:
             data = np.load(p)
-            gyr_world = data[:, 1:4]
-            acc_world = data[:, 4:7]
+
+            gyr_body = data[:, 1:4].astype(np.float32)
+            acc_body = data[:, 4:7].astype(np.float32)
             quat_data = data[:, 7:11].astype(np.float32)
-            
-            rotations_inv = R.from_quat(quat_data).inv()
-            gyr_body = rotations_inv.apply(gyr_world)
-            acc_body = rotations_inv.apply(acc_world)
-            
-            imu_data = np.concatenate([acc_body, gyr_body], axis=1).astype(np.float32)
-            all_imu.append(imu_data)
-            
-        concat = np.concatenate(all_imu, axis=0)
-        mean = concat.mean(axis=0)
-        std = concat.std(axis=0) + 1e-8
-        return mean, std
+
+            T = len(acc_body)
+
+            for start in range(0, T - window_len, stride):
+                end = start + window_len
+
+                acc_win = acc_body[start:end]  # [L, 3]
+                gyr_win = gyr_body[start:end]  # [L, 3]
+
+                # 각 시점 body -> world
+                R_all = R.from_quat(quat_data[start:end]).as_matrix().astype(np.float32)  # [L,3,3]
+
+                # 시작점 yaw 제거
+                r_start = R.from_quat(quat_data[start])
+                yaw0 = r_start.as_euler('zyx', degrees=False)[0]
+                R_yaw_inv = R.from_euler('z', yaw0).inv().as_matrix().astype(np.float32)
+
+                acc_world = np.einsum('tij,tj->ti', R_all, acc_win)
+                gyr_world = np.einsum('tij,tj->ti', R_all, gyr_win)
+
+                acc_ga = (R_yaw_inv @ acc_world.T).T
+                gyr_ga = (R_yaw_inv @ gyr_world.T).T
+
+                imu_win = np.concatenate([acc_ga, gyr_ga], axis=1).astype(np.float32)  # [L, 6]
+
+                ch_sum += imu_win.sum(axis=0)
+                ch_sumsq += (imu_win ** 2).sum(axis=0)
+                count += imu_win.shape[0]
+
+        mean = ch_sum / max(count, 1)
+        var = ch_sumsq / max(count, 1) - mean ** 2
+        std = np.sqrt(np.maximum(var, 1e-8)).astype(np.float32)
+
+        return mean.astype(np.float32), std + 1e-8
 
     def get_stats(self) -> Tuple[np.ndarray, np.ndarray]:
         return self._stats
