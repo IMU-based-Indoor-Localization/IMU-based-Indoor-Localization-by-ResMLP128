@@ -113,44 +113,57 @@ def plot_trajectory(model_path, data_path, device,
     print("Pred traj range min:", pred_pos.min(axis=0))
     print("Pred traj range max:", pred_pos.max(axis=0))
 
-    # step endpoint 기준 RMSE
-    # pred_pos[1:] <-> gt_anchor_positions
-    rmse = np.sqrt(np.mean(np.sum((pred_pos[1:] - gt_anchor_positions) ** 2, axis=1)))
-    print(f"Step-endpoint RMSE: {rmse:.4f} m")
+    # 3D step-endpoint RMSE
+    rmse_3d = np.sqrt(np.mean(np.sum((pred_pos[1:] - gt_anchor_positions) ** 2, axis=1)))
+    print(f"Step-endpoint RMSE (3D): {rmse_3d:.4f} m")
 
-    # 11. 3D plot
-    fig = plt.figure(figsize=(11, 8))
-    ax = fig.add_subplot(111, projection="3d")
+    # XY 기준 step-endpoint RMSE
+    rmse_xy = np.sqrt(
+        np.mean(
+            np.sum((pred_pos[1:, :2] - gt_anchor_positions[:, :2]) ** 2, axis=1)
+        )
+    )
+    print(f"Step-endpoint RMSE (XY): {rmse_xy:.4f} m")
 
-    # 전체 GT absolute trajectory
+    # 11. 2D XY plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # GT
     ax.plot(
-        gt_pos_full[:, 0], gt_pos_full[:, 1], gt_pos_full[:, 2],
-        label="Ground Truth (absolute)", color="blue", alpha=0.45
+        gt_pos_full[:, 0], gt_pos_full[:, 1],
+        label="GT", color="blue", alpha=0.7, linewidth=2.0
     )
 
-    # GT step endpoints
+    # Prediction
     ax.plot(
-        gt_anchor_positions[:, 0], gt_anchor_positions[:, 1], gt_anchor_positions[:, 2],
-        label="GT step endpoints", color="cyan", alpha=0.8
+        pred_pos[:, 0], pred_pos[:, 1],
+        label="Prediction", color="red", alpha=0.9, linewidth=2.0
     )
 
-    # 모델 예측 trajectory
-    ax.plot(
-        pred_pos[:, 0], pred_pos[:, 1], pred_pos[:, 2],
-        label="Prediction (reconstructed)", color="red", alpha=0.9
+    # Start / End points
+    ax.scatter(
+        gt_pos_full[0, 0], gt_pos_full[0, 1],
+        marker="o", s=60, label="Start"
     )
-
-    # target 복원 trajectory (디버그용)
-    ax.plot(
-        target_recon[:, 0], target_recon[:, 1], target_recon[:, 2],
-        label="Target recon (debug)", color="green", alpha=0.7
+    ax.scatter(
+        gt_pos_full[-1, 0], gt_pos_full[-1, 1],
+        marker="x", s=70, label="GT End"
+    )
+    ax.scatter(
+        pred_pos[-1, 0], pred_pos[-1, 1],
+        marker="x", s=70, label="Pred End"
     )
 
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
-    ax.set_zlabel("Z (m)")
-    ax.set_title(f"Trajectory Reconstruction\n{Path(data_path).name} | stride={stride}")
+    ax.set_title(
+        f"Trajectory Reconstruction (XY)\n"
+        f"{Path(data_path).name} | stride={stride} | RMSE_XY={rmse_xy:.3f} m"
+    )
     ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect("equal", adjustable="box")
+
     plt.tight_layout()
     plt.show()
 
