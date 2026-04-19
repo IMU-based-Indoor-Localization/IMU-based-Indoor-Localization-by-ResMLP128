@@ -23,63 +23,66 @@ from dataset import build_dataloaders
 from losses import CombinedLoss, compute_class_weights
 from model_twolayer import TwoLayerModel
 
+# Oxford raw label → 0-indexed class id
+# raw: -1=noise, 1=handbag, 2=handheld, 3=pocket, 4=running, 5=slow, 6=trolley
+LABEL_REMAP = {-1: 6, 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+NUM_CLASSES  = 7
+
 
 DEFAULT_CONFIG = {
     # --- 데이터셋 설정 ---
-    "train_dir": "dataset_split/train",  # 변환된 .npy 파일 경로
-    "val_dir":   "dataset_split/val",
-    "test_dir":  "dataset_split/test",
-    
-    # TLIO 기본 사양 (200Hz 1초)
-    "window_len":   200,   # 기존 100 -> 200으로 변경
+    "train_dir": "cls_split_7way/train",
+    "val_dir":   "cls_split_7way/val",
+    "test_dir":  "cls_split_7way/test",
+    "fmt":        "oxford",   # "tlio" | "oxford"
+    "with_label": True,       # Oxford joint training
+
+    "window_len":   100,   # Oxford 100Hz × 1s = TLIO 200Hz × 1s 와 동일 시간
     "train_stride": 10,
     "eval_stride":  10,
-    
-    "batch_size":   128,   # window_len이 늘어났으므로 OOM 방지를 위해 조절
+
+    "batch_size":   128,
     "num_workers":  4,
 
     # --- 모델 설정 ---
     "model": {
-        "input_len": 200,        # window_len과 동일하게 설정
-        "input_channel": 6,      # 14ch -> 6ch (Raw IMU: acc+gyro)
-        "patch_len": 20,         # 200 길이를 4개의 patch(200/50=4)로 나눔 (비율 유지)
-        "feature_dim": 128,      # 논문 기준 ResMLP128
-        "out_dim": 3,            # 3D 위치 변위 (x, y, z)
-        "active_func": "GELU",
-        
-        "extractor": {
-            "name": "ResMLP", 
-            "layer_num": 6, 
-            "expansion": 2, 
-            "dropout": 0.2
-        },
-        "reg": {
-            "name": "SimpleMean",  # 중요: Classifier 없는 단순 풀링 회귀
-            "layer_num": 3, 
-            "dropout": 0.2
-        },
-        "use_classifier": False,   # [핵심] 분류기(auxiliary task) 완전 비활성화
+        "input_len":     100,
+        "input_channel": 6,
+        "patch_len":     10,  # 패치 수 10개 유지 (100/10)
+        "feature_dim":   128,
+        "out_dim":       3,
+        "active_func":   "GELU",
+
+        "extractor": {"name": "ResMLP", "layer_num": 6, "expansion": 2, "dropout": 0.2},
+        "reg":       {"name": "PoseCondMean", "layer_num": 3, "dropout": 0.2},
+        "classifier": {"num_classes": 7, "layer_num": 2, "dropout": 0.3, "pooling_type": "mean"},
+        "use_classifier": True,
     },
 
-    # --- 손실 함수 (Loss) 설정 ---
+    # --- 사전학습 가중치 ---
+    # extractor: 회귀 모델에서 이식 / cls_head: standalone 분류기에서 이식
+    "pretrained_reg": "out_tlio_6ch_128/checkpoints/best.pth",
+    "pretrained_cls": "out_classifier_7way/checkpoints/best.pth",
+
+    # --- 손실 함수 설정 ---
     "loss": {
-        "cls_weight": 0.0,       # 분류 loss 제거
-        "dir_weight": 0.0,       # 방향 loss 제거
-        "label_smoothing": 0.0,
-        "use_class_weights": False,
-        "mse_epochs": 100,        # [논문 핵심 전략] 첫 60 Epoch은 MSE로 수렴시키고 이후 NLL(Uncertainty) 학습
+        "cls_weight":       0.3,   # regression + 0.3 * classification
+        "dir_weight":       0.0,
+        "label_smoothing":  0.05,
+        "use_class_weights": True,
+        "mse_epochs":       30,    # 초반 MSE로 회귀 안정화 후 NLL 전환
     },
 
     # --- 최적화 설정 ---
-    "optimizer": {"name": "Adam", "lr": 5e-4}, # weight_decay 없음
-    "scheduler": {"name": "CosineAnnealingLR", "T_max": 150, "eta_min": 1e-6},
+    "optimizer": {"name": "AdamW", "lr": 1e-4, "weight_decay": 1e-4},
+    "scheduler": {"name": "CosineAnnealingLR", "T_max": 100, "eta_min": 1e-6},
     "warmup_epochs": 5,
-    "epochs": 200,               # 전체 학습 에폭
+    "epochs": 100,
     "grad_clip": 1.0,
     "log_interval": 50,
     "save_every": 10,
-    "early_stopping": 60,
-    "output_dir": "out_tlio_6ch_128", # 출력 폴더명 변경
+    "early_stopping": 30,
+    "output_dir": "out_classifier",
 }
 
 
@@ -124,9 +127,57 @@ class AverageMeter:
 
 def collect_train_labels(loader):
     lbls = []
-    for _, _, lb in loader:
-        lbls.append(lb)
+    for batch in loader:
+        lbls.append(batch[2])
     return torch.cat(lbls, dim=0)
+
+
+def remap_labels(labels: torch.Tensor) -> torch.Tensor:
+    """Oxford raw label(-1,1-6) → 0-indexed(0-6)."""
+    out = labels.clone()
+    for raw, idx in LABEL_REMAP.items():
+        out[labels == raw] = idx
+    return out
+
+
+def load_pretrained_weights(model: TwoLayerModel, reg_ckpt: str, cls_ckpt: str, logger):
+    """
+    extractor → 회귀 모델 체크포인트에서 이식
+    pose_classifier → standalone 분류기 체크포인트에서 이식 (키 매칭 시)
+    reg head는 구조 변경(PoseConditioned)으로 인해 랜덤 초기화 유지
+    """
+    device = next(model.parameters()).device
+
+    if reg_ckpt and Path(reg_ckpt).exists():
+        ck = torch.load(reg_ckpt, map_location=device, weights_only=False)
+        sd = ck["model"] if "model" in ck else ck
+        # extractor 가중치만 추출
+        ext_sd_raw = {k[len("extractor."):]: v for k, v in sd.items() if k.startswith("extractor.")}
+        # 크기 불일치 레이어 제외 (patch_len 변경 시 첫 Linear 차원 달라짐)
+        cur_sd = model.extractor.state_dict()
+        ext_sd = {k: v for k, v in ext_sd_raw.items()
+                  if k in cur_sd and v.shape == cur_sd[k].shape}
+        skipped = [k for k in ext_sd_raw if k not in ext_sd]
+        missing, unexpected = model.extractor.load_state_dict(ext_sd, strict=False)
+        logger.info(f"[pretrain] extractor 이식: {len(ext_sd)}개 레이어 완료, {len(skipped)}개 크기 불일치 → 랜덤 초기화")
+        if skipped:
+            logger.info(f"  → 랜덤 초기화 레이어: {skipped}")
+    else:
+        logger.info(f"[pretrain] reg 체크포인트 없음, extractor 랜덤 초기화")
+
+    if cls_ckpt and Path(cls_ckpt).exists() and model.use_classifier:
+        ck = torch.load(cls_ckpt, map_location=device)
+        sd = ck["model"] if "model" in ck else ck
+        # pose_classifier 키 시도
+        cls_sd = {k[len("pose_classifier."):]: v for k, v in sd.items() if k.startswith("pose_classifier.")}
+        if cls_sd:
+            missing, unexpected = model.pose_classifier.load_state_dict(cls_sd, strict=False)
+            logger.info(f"[pretrain] pose_classifier 이식 완료 (missing={len(missing)}, unexpected={len(unexpected)})")
+        else:
+            # standalone 분류기는 다른 구조일 수 있음 → 랜덤 초기화 유지
+            logger.info(f"[pretrain] cls 체크포인트 키 불일치, pose_classifier 랜덤 초기화")
+    else:
+        logger.info(f"[pretrain] cls 체크포인트 없음 또는 분류기 미사용")
 
 
 def compute_tf_ratio(epoch, total_epochs, tf_start=1.0, tf_end=0.0, warmup=40):
@@ -140,15 +191,22 @@ def compute_tf_ratio(epoch, total_epochs, tf_start=1.0, tf_end=0.0, warmup=40):
 def train_one_epoch(model, loader, criterion, optimizer, device, cfg, logger, epoch):
     model.train()
     use_cls = cfg["model"].get("use_classifier", False)
+    with_label = cfg.get("with_label", False)
     tf_ratio = compute_tf_ratio(epoch, cfg["epochs"]) if use_cls else 0.0
     m = {k: AverageMeter() for k in ["reg", "dir", "cls", "rmse"]}
-    for step, (imu, target) in enumerate(loader):
-        imu, target = imu.to(device), target.to(device)
-        label = None  # 분류기를 사용하지 않으므로 None 처리
 
-        # pose_labels와 pose_logits는 더 이상 쓰지 않습니다.
-        y_hat, log_var, _ = model(imu, pose_labels=None, tf_ratio=0.0) 
-        loss, d = criterion(y_hat, log_var, target, None, None)
+    for step, batch in enumerate(loader):
+        if with_label:
+            imu, target, label_raw = batch
+            label = remap_labels(label_raw).to(device)
+        else:
+            imu, target = batch
+            label = None
+
+        imu, target = imu.to(device), target.to(device)
+
+        y_hat, log_var, pose_logits = model(imu, pose_labels=label, tf_ratio=tf_ratio)
+        loss, d = criterion(y_hat, log_var, target, pose_logits, label)
 
         optimizer.zero_grad()
         loss.backward()
@@ -166,39 +224,47 @@ def train_one_epoch(model, loader, criterion, optimizer, device, cfg, logger, ep
 
         if (step + 1) % cfg.get("log_interval", 50) == 0:
             logger.info(f"  Epoch {epoch:03d} [{step+1:4d}/{len(loader)}]  "
-                        f"reg={d['reg']:.4f}  dir={d['dir']:.4f}  rmse={m['rmse'].avg:.4f}")
+                        f"reg={d['reg']:.4f}  cls={d['cls']:.4f}  rmse={m['rmse'].avg:.4f}")
 
     return {k: v.avg for k, v in m.items()}
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device, hard_idx=None):
+def evaluate(model, loader, criterion, device, with_label=False):
     model.eval()
     reg_m = AverageMeter(); cls_m = AverageMeter()
     errs = []
-    
-    for imu, target in loader:
+    correct = 0; total = 0
+
+    for batch in loader:
+        if with_label:
+            imu, target, label_raw = batch
+            label = remap_labels(label_raw).to(device)
+        else:
+            imu, target = batch
+            label = None
+
         imu, target = imu.to(device), target.to(device)
-        
-        # pose_logits와 label은 사용하지 않음
-        y_hat, log_var, _ = model(imu)
-        _, d = criterion(y_hat, log_var, target, None, None)
-        
+
+        y_hat, log_var, pose_logits = model(imu)
+        _, d = criterion(y_hat, log_var, target, pose_logits, label)
+
         B = imu.size(0)
         reg_m.update(d["reg"], B)
-        # cls loss는 무시해도 됩니다. (0으로 나옴)
-        
+        cls_m.update(d["cls"], B)
         errs.append((y_hat - target).cpu().numpy())
 
+        if pose_logits is not None and label is not None:
+            pred_cls = pose_logits.argmax(dim=1)
+            correct += (pred_cls == label).sum().item()
+            total   += B
+
     errs = np.concatenate(errs, 0)
-    
     rmse_xyz = np.sqrt((errs ** 2).mean(0))
     rmse = float(np.sqrt((errs ** 2).sum(1).mean()))
-    
-    # acc는 분류기가 없으므로 의미 없는 값 0.0을 반환합니다.
-    acc = 0.0
+    acc  = correct / total if total > 0 else 0.0
 
-    return {"reg": reg_m.avg, "cls": 0.0, "rmse": rmse,
+    return {"reg": reg_m.avg, "cls": cls_m.avg, "rmse": rmse,
             "rmse_x": float(rmse_xyz[0]), "rmse_y": float(rmse_xyz[1]),
             "rmse_z": float(rmse_xyz[2]), "acc": acc}
 
@@ -217,22 +283,16 @@ def train(cfg):
     device = get_device()
     logger.info(f"디바이스: {device}")
 
-    logger.info("데이터셋 로딩...")
-    # input_channel에 따라 입력 컬럼 자동 선택
-    _ch = cfg["model"]["input_channel"]
-    logger.info(f"입력 채널: {_ch}ch (TLIO 데이터 고정)")
-    _aug = cfg.get("augment", {})
+    fmt        = cfg.get("fmt", "tlio")
+    with_label = cfg.get("with_label", False)
+    logger.info(f"데이터셋 로딩... fmt={fmt}  with_label={with_label}")
     loaders = build_dataloaders(
         train_paths=cfg["train_dir"], val_paths=cfg["val_dir"],
         test_paths=cfg.get("test_dir"),
         window_len=cfg["window_len"],
         train_stride=cfg["train_stride"], eval_stride=cfg["eval_stride"],
         batch_size=cfg["batch_size"], num_workers=cfg["num_workers"],
-        normalize=True,
-        augment_noise=_aug.get("noise", False),
-        noise_std=_aug.get("noise_std", 0.02),
-        augment_scale=_aug.get("scale", False),
-        scale_range=tuple(_aug.get("scale_range", [0.8, 1.25])),
+        fmt=fmt, with_label=with_label,
     )
     train_loader = loaders["train"]; val_loader = loaders["val"]
     test_loader = loaders.get("test")
@@ -244,14 +304,22 @@ def train(cfg):
     model = TwoLayerModel(cfg["model"]).to(device)
     logger.info(f"파라미터 수: {count_parameters(model):,}")
 
-    # class weights (분류기 사용 시에만)
+    # 사전학습 가중치 이식
+    load_pretrained_weights(
+        model,
+        reg_ckpt=cfg.get("pretrained_reg", ""),
+        cls_ckpt=cfg.get("pretrained_cls", ""),
+        logger=logger,
+    )
+
+    # class weights (joint training 시 label 불균형 보정)
     use_classifier = cfg["model"].get("use_classifier", False)
     class_weights = None
-    #if use_classifier and cfg["loss"].get("use_class_weights", True):
-    #    logger.info("train set 클래스 가중치 계산...")
-    #    all_lbls = collect_train_labels(train_loader)
-    #    class_weights = compute_class_weights(all_lbls, NUM_CLASSES).to(device)
-    #    logger.info(f"  weights: {class_weights.cpu().numpy().round(3)}")
+    if use_classifier and with_label and cfg["loss"].get("use_class_weights", False):
+        logger.info("train set 클래스 가중치 계산...")
+        all_lbls = remap_labels(collect_train_labels(train_loader))
+        class_weights = compute_class_weights(all_lbls, NUM_CLASSES).to(device)
+        logger.info(f"  weights: {class_weights.cpu().numpy().round(3)}")
 
     mse_epochs = cfg["loss"].get("mse_epochs", 0)
     criterion = CombinedLoss(
@@ -326,7 +394,7 @@ def train(cfg):
 
         tr = train_one_epoch(model, train_loader, criterion, optimizer,
                              device, cfg, logger, epoch)
-        vl = evaluate(model, val_loader, criterion, device, hard_idx=None)
+        vl = evaluate(model, val_loader, criterion, device, with_label=with_label)
 
         if scheduler is not None:
             if epoch > warmup_epochs:  # 워밍업 중에는 scheduler.step() 스킵
@@ -336,13 +404,13 @@ def train(cfg):
                     scheduler.step()
 
         lr_now = optimizer.param_groups[0]["lr"]
-        use_cls = cfg["model"].get("use_classifier", False)
+        acc_str = f" acc={vl['acc']:.3f}" if use_classifier else ""
         logger.info(
             f"Epoch {epoch:03d}/{cfg['epochs']}  lr={lr_now:.2e}  "
-            f"train[reg={tr['reg']:.4f} dir={tr['dir']:.4f} rmse={tr['rmse']:.4f}]  "
-            f"val[rmse={vl['rmse']:.4f} xyz=({vl['rmse_x']:.3f},{vl['rmse_y']:.3f},{vl['rmse_z']:.3f})"
-            + (f" acc={vl['acc']:.3f}" if use_cls else "") +
-            f"]  ({time.time()-t0:.1f}s)"
+            f"train[reg={tr['reg']:.4f} cls={tr['cls']:.4f} rmse={tr['rmse']:.4f}]  "
+            f"val[rmse={vl['rmse']:.4f} cls={vl['cls']:.4f}"
+            f" xyz=({vl['rmse_x']:.3f},{vl['rmse_y']:.3f},{vl['rmse_z']:.3f})"
+            f"{acc_str}]  ({time.time()-t0:.1f}s)"
         )
 
         # best model 기준: 전체 val rmse (rmse_hard는 handbag/pocket만 반영해
@@ -377,10 +445,10 @@ def train(cfg):
         logger.info("=" * 60)
         logger.info("테스트 평가 (best.pth 로드)")
         load_checkpoint(ckpt_dir / "best.pth", model, device=device)
-        tm = evaluate(model, test_loader, criterion, device, hard_idx = None)
-        logger.info(f"Test  rmse={tm['rmse']:.4f}  rmse_hard={tm['rmse_hard']:.4f}  "
+        tm = evaluate(model, test_loader, criterion, device, with_label=with_label)
+        logger.info(f"Test  rmse={tm['rmse']:.4f}  "
                     f"xyz=({tm['rmse_x']:.3f},{tm['rmse_y']:.3f},{tm['rmse_z']:.3f})  "
-                    f"acc={tm['acc']:.3f}")
+                    f"cls={tm['cls']:.4f}  acc={tm['acc']:.3f}")
 
 
 def parse_args():

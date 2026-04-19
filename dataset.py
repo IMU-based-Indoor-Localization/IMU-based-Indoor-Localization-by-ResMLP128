@@ -7,12 +7,23 @@ import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from scipy.spatial.transform import Rotation as R
 
+# 포맷별 컬럼 인덱스 정의
+# TLIO: ts(1)+gyr(3)+acc(3)+quat(4)+pos(3)+vel(3) = 17col
+# Oxford: ts(1)+gyr(3)+acc(3)+gravity(3)+attitude(3)+label(1)+qxyzw(4)+pos(3)+vel(3) = 24col
+_COL = {
+    "tlio":   {"quat": (7,  11), "pos": (11, 14), "label": None},
+    "oxford": {"quat": (14, 18), "pos": (18, 21), "label": 13},
+}
+
 # ---------------------------------------------------------------------------
 # 1. 단일 .npy 파일 처리 Dataset
 # ---------------------------------------------------------------------------
 class TLIONpySingleDataset(Dataset):
     """
     하나의 TLIO .npy 파일에서 슬라이딩 윈도우 샘플을 생성합니다.
+    fmt='tlio'   : TLIO 17col 포맷 (label 없음)
+    fmt='oxford' : Oxford 24col 포맷 (label col 13 포함)
+    with_label   : True 시 __getitem__ 반환값에 label(int) 추가
     """
     def __init__(
         self,
@@ -21,23 +32,34 @@ class TLIONpySingleDataset(Dataset):
         stride: int = 10,
         normalize: bool = True,
         precomputed_stats: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-        is_train: bool = True,  # <--- 이 줄 추가
+        is_train: bool = True,
+        fmt: str = "tlio",
+        with_label: bool = False,
     ):
-        self.is_train = is_train # <--- 이 줄 추가
+        assert fmt in _COL, f"fmt must be 'tlio' or 'oxford', got '{fmt}'"
+        self.is_train = is_train
         self.npy_path = Path(npy_path)
         self.window_len = window_len
         self.stride = stride
+        self.with_label = with_label
+        self.fmt = fmt
 
-        # 1. NPY 파일 로드 (Shape: [N, 17])
+        col = _COL[fmt]
+
+        # 1. NPY 파일 로드
         data = np.load(self.npy_path)
 
         # 2. 컬럼 슬라이싱
-        # TLIO 입력은 "윈도우 시작 기준 local gravity-aligned frame"으로 만들 것이므로
-        # 여기서는 raw body IMU를 그대로 들고 있고, __getitem__에서 window별 변환을 수행한다.
         self.gyr_body = data[:, 1:4].astype(np.float32)
         self.acc_body = data[:, 4:7].astype(np.float32)
-        self.quat_data = data[:, 7:11].astype(np.float32)
-        self.pos_data = data[:, 11:14].astype(np.float32)
+        self.quat_data = data[:, col["quat"][0]:col["quat"][1]].astype(np.float32)
+        self.pos_data  = data[:, col["pos"][0] :col["pos"][1] ].astype(np.float32)
+
+        # label: Oxford는 시퀀스 전체가 동일한 정수값 → 첫 행에서 읽음
+        if with_label and col["label"] is not None:
+            self.label = int(data[0, col["label"]])
+        else:
+            self.label = -1  # label 미사용 시 sentinel
 
         # 3. 정규화 통계
         self.normalize = normalize
@@ -45,7 +67,6 @@ class TLIONpySingleDataset(Dataset):
             if precomputed_stats is not None:
                 self.mean, self.std = precomputed_stats
             else:
-                # 단일 파일 fallback: 같은 gravity-aligned 입력 기준으로 통계 계산
                 self.mean, self.std = self._compute_local_stats()
         else:
             self.mean, self.std = None, None
@@ -150,7 +171,12 @@ class TLIONpySingleDataset(Dataset):
         # [5] 모델 입력 형태 [6, window_len]
         imu_np = imu_np.T.copy()
 
-        return torch.from_numpy(imu_np), torch.from_numpy(target_np.astype(np.float32))
+        imu_t    = torch.from_numpy(imu_np)
+        target_t = torch.from_numpy(target_np.astype(np.float32))
+
+        if self.with_label:
+            return imu_t, target_t, torch.tensor(self.label, dtype=torch.long)
+        return imu_t, target_t
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +185,8 @@ class TLIONpySingleDataset(Dataset):
 class TLIOMultiDataset(Dataset):
     """
     여러 개의 .npy 파일(여러 폴더)을 하나의 Dataset으로 합칩니다.
+    fmt='tlio' | 'oxford'  포맷 선택
+    with_label=True 시 (imu, displacement, label) 3-tuple 반환
     """
     def __init__(
         self,
@@ -168,12 +196,14 @@ class TLIOMultiDataset(Dataset):
         normalize: bool = True,
         precomputed_stats: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         is_train: bool = True,
+        fmt: str = "tlio",
+        with_label: bool = False,
     ):
         base_dir = Path(base_dir)
-        
-        # [매우 중요] rglob을 사용하여 하위 폴더의 모든 .npy 파일을 재귀적으로 찾습니다.
+        self.fmt = fmt
+        self.with_label = with_label
+
         npy_paths = sorted(base_dir.rglob("*.npy"))
-        
         if not npy_paths:
             raise ValueError(f"[{base_dir}] 경로에서 .npy 파일을 찾을 수 없습니다.")
 
@@ -183,6 +213,7 @@ class TLIOMultiDataset(Dataset):
                 npy_paths=npy_paths,
                 window_len=window_len,
                 stride=stride,
+                fmt=fmt,
             )
         # 개별 파일별 Dataset 생성
         sub_datasets = [
@@ -192,7 +223,9 @@ class TLIOMultiDataset(Dataset):
                 stride=stride,
                 normalize=normalize,
                 precomputed_stats=precomputed_stats,
-                is_train=is_train,  # <--- 이 줄 추가
+                is_train=is_train,
+                fmt=fmt,
+                with_label=with_label,
             )
             for p in npy_paths
         ]
@@ -206,9 +239,11 @@ class TLIOMultiDataset(Dataset):
         self,
         npy_paths: List[Path],
         window_len: int,
-        stride: int
+        stride: int,
+        fmt: str = "tlio",
     ) -> Tuple[np.ndarray, np.ndarray]:
 
+        col = _COL[fmt]
         ch_sum = np.zeros(6, dtype=np.float64)
         ch_sumsq = np.zeros(6, dtype=np.float64)
         count = 0
@@ -218,9 +253,9 @@ class TLIOMultiDataset(Dataset):
         for p in npy_paths:
             data = np.load(p)
 
-            gyr_body = data[:, 1:4].astype(np.float32)
-            acc_body = data[:, 4:7].astype(np.float32)
-            quat_data = data[:, 7:11].astype(np.float32)
+            gyr_body  = data[:, 1:4].astype(np.float32)
+            acc_body  = data[:, 4:7].astype(np.float32)
+            quat_data = data[:, col["quat"][0]:col["quat"][1]].astype(np.float32)
 
             T = len(acc_body)
 
@@ -281,51 +316,41 @@ def build_dataloaders(
     eval_stride: int = 50,
     batch_size: int = 128,
     num_workers: int = 4,
-    **kwargs # 호환성을 위한 쓰레기값 받기
+    fmt: str = "tlio",
+    with_label: bool = False,
+    **kwargs
 ) -> dict:
     """
-    train.py에서 호출하는 최종 DataLoader 생성 함수
+    train.py에서 호출하는 최종 DataLoader 생성 함수.
+    fmt='oxford' + with_label=True 로 joint training 데이터 로드 가능.
     """
-    
+    ds_kwargs = dict(window_len=window_len, normalize=True, fmt=fmt, with_label=with_label)
+
     # 1. Train 데이터셋 로드 (정규화 통계 자동 계산)
-    train_ds = TLIOMultiDataset(
-        base_dir=train_paths,
-        window_len=window_len,
-        stride=train_stride,
-        normalize=True, 
-        is_train=True
-    )
+    train_ds = TLIOMultiDataset(base_dir=train_paths, stride=train_stride, is_train=True, **ds_kwargs)
     stats = train_ds.get_stats()
 
     # 2. Val 데이터셋 로드 (Train 통계로 정규화)
     val_ds = TLIOMultiDataset(
-        base_dir=val_paths,
-        window_len=window_len,
-        stride=eval_stride,
-        normalize=True, 
-        precomputed_stats=stats, 
-        is_train=False
+        base_dir=val_paths, stride=eval_stride, is_train=False,
+        precomputed_stats=stats, **ds_kwargs
     )
 
     loaders = {
-        "train": DataLoader(train_ds, batch_size=batch_size, shuffle=True, 
-            num_workers=num_workers, pin_memory=True, drop_last=True),
-        "val": DataLoader(val_ds, batch_size=batch_size, shuffle=False, 
-            num_workers=num_workers, pin_memory=True),
+        "train": DataLoader(train_ds, batch_size=batch_size, shuffle=True,
+                            num_workers=num_workers, pin_memory=True, drop_last=True),
+        "val":   DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
+                            num_workers=num_workers, pin_memory=True),
         "stats": stats,
     }
 
     # 3. Test 데이터셋 로드 (선택)
     if test_paths and Path(test_paths).exists():
         test_ds = TLIOMultiDataset(
-            base_dir=test_paths,
-            window_len=window_len,
-            stride=eval_stride,
-            normalize=True, 
-            precomputed_stats=stats, 
-            is_train=False
+            base_dir=test_paths, stride=eval_stride, is_train=False,
+            precomputed_stats=stats, **ds_kwargs
         )
-        loaders["test"] = DataLoader(test_ds, batch_size=batch_size, shuffle=False, 
-                        num_workers=num_workers, pin_memory=True)
+        loaders["test"] = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
+                                     num_workers=num_workers, pin_memory=True)
 
     return loaders

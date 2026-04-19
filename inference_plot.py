@@ -9,178 +9,176 @@ from model_twolayer import TwoLayerModel
 from dataset import TLIONpySingleDataset
 
 
-def plot_trajectory(model_path, data_path, device,
-                    norm_mean_path, norm_std_path,
-                    stride=200):
-    # 1. 모델 설정
+def load_model(model_path, device, use_classifier=True, input_len=100, patch_len=10):
     model_para = {
-        "input_len": 200,
-        "input_channel": 6,
-        "patch_len": 20,
-        "feature_dim": 128,
-        "out_dim": 3,
-        "active_func": "GELU",
+        "input_len": input_len, "input_channel": 6, "patch_len": patch_len,
+        "feature_dim": 128, "out_dim": 3, "active_func": "GELU",
         "extractor": {"name": "ResMLP", "layer_num": 6, "expansion": 2, "dropout": 0.0},
-        "reg": {"name": "SimpleMean", "layer_num": 3, "dropout": 0.0},
-        "use_classifier": False,
+        "reg": {"name": "PoseCondMean" if use_classifier else "SimpleMean",
+                "layer_num": 3, "dropout": 0.0},
+        "classifier": {"num_classes": 7, "layer_num": 2, "dropout": 0.0, "pooling_type": "mean"},
+        "use_classifier": use_classifier,
     }
-
-    # 2. 모델 로드
     model = TwoLayerModel(model_para).to(device)
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model"])
     model.eval()
     print(f"모델 로드 완료: {model_path}")
+    return model
 
-    # 3. 학습 시 저장한 정규화 통계 로드
-    norm_mean = np.load(norm_mean_path)
-    norm_std = np.load(norm_std_path)
 
-    # 4. 데이터셋 로드
-    #    주의: stride=1로 두면 1초 displacement가 서로 심하게 겹치므로
-    #    trajectory 복원용으로는 non-overlap(stride=200) 권장
+def infer_single_file(model, data_path, device, norm_mean, norm_std,
+                      stride=100, fmt="oxford", window_len=100):
+    # Oxford: quat=14:18, pos=18:21 / TLIO: quat=7:11, pos=11:14
+    if fmt == "oxford":
+        quat_col, pos_col = (14, 18), (18, 21)
+    else:
+        quat_col, pos_col = (7, 11), (11, 14)
+
     dataset = TLIONpySingleDataset(
         npy_path=data_path,
-        window_len=200,
+        window_len=window_len,
         stride=stride,
         normalize=True,
         precomputed_stats=(norm_mean, norm_std),
         is_train=False,
+        fmt=fmt,
+        with_label=False,
     )
     loader = DataLoader(dataset, batch_size=256, shuffle=False)
-    print(f"데이터 로드 완료: {data_path} (샘플 수: {len(dataset)})")
 
-    # 5. 원본 absolute GT 로드
     raw = np.load(data_path)
-    quat = raw[:, 7:11].astype(np.float32)
-    gt_pos_full = raw[:, 11:14].astype(np.float32)
+    quat        = raw[:, quat_col[0]:quat_col[1]].astype(np.float32)
+    gt_pos_full = raw[:, pos_col[0]: pos_col[1]].astype(np.float32)
 
-    # 6. 추론
     all_preds = []
-    all_targets = []
-
     with torch.no_grad():
-        for imu, target in loader:
+        for imu, _ in loader:
             imu = imu.to(device)
             y_hat, _, _ = model(imu)
             all_preds.append(y_hat.cpu().numpy())
-            all_targets.append(target.cpu().numpy())
 
-    preds_local = np.concatenate(all_preds, axis=0)     # [K, 3]
-    targets_local = np.concatenate(all_targets, axis=0) # [K, 3]
+    preds_local = np.concatenate(all_preds, axis=0)  # [K, 3]
 
-    # 7. local displacement -> world displacement 변환
-    pred_world_steps = []
-    target_world_steps = []
+    pred_world_steps   = []
     gt_anchor_positions = []
 
     for k, start in enumerate(dataset.indices):
         end = start + dataset.window_len
-
-        # window 시작 시점 yaw만 사용 (dataset.py와 동일한 정의)
         r_start = R.from_quat(quat[start])
-        yaw = r_start.as_euler("zyx", degrees=False)[0]
-        R_yaw = R.from_euler("z", yaw).as_matrix()
+        yaw     = r_start.as_euler("zyx", degrees=False)[0]
+        R_yaw   = R.from_euler("z", yaw).as_matrix()
 
-        pred_world = R_yaw @ preds_local[k]
-        target_world = R_yaw @ targets_local[k]
+        pred_world_steps.append(R_yaw @ preds_local[k])
+        gt_anchor_positions.append(gt_pos_full[end])
 
-        pred_world_steps.append(pred_world)
-        target_world_steps.append(target_world)
-        gt_anchor_positions.append(gt_pos_full[end])  # 각 윈도우 끝 absolute GT
+    pred_world_steps    = np.array(pred_world_steps,    dtype=np.float32)
+    gt_anchor_positions = np.array(gt_anchor_positions, dtype=np.float32)
 
-    pred_world_steps = np.asarray(pred_world_steps, dtype=np.float32)
-    target_world_steps = np.asarray(target_world_steps, dtype=np.float32)
-    gt_anchor_positions = np.asarray(gt_anchor_positions, dtype=np.float32)
-
-    # 8. 예측 궤적 복원
-    #    첫 위치는 실제 GT 시작점으로 고정
     pred_pos = [gt_pos_full[0].copy()]
     for step in pred_world_steps:
         pred_pos.append(pred_pos[-1] + step)
-    pred_pos = np.asarray(pred_pos, dtype=np.float32)
+    pred_pos = np.array(pred_pos, dtype=np.float32)
 
-    # 9. GT 비교용 step trajectory
-    #    target을 world로 되돌린 뒤 누적하면 dataset target 정의가 맞는지 같이 확인 가능
-    target_recon = [gt_pos_full[0].copy()]
-    for step in target_world_steps:
-        target_recon.append(target_recon[-1] + step)
-    target_recon = np.asarray(target_recon, dtype=np.float32)
+    rmse_xy = float(np.sqrt(
+        np.mean(np.sum((pred_pos[1:, :2] - gt_anchor_positions[:, :2]) ** 2, axis=1))
+    ))
 
-    # 10. 간단한 수치 점검
-    print("GT full range min:", gt_pos_full.min(axis=0))
-    print("GT full range max:", gt_pos_full.max(axis=0))
-    print("Pred traj range min:", pred_pos.min(axis=0))
-    print("Pred traj range max:", pred_pos.max(axis=0))
+    return gt_pos_full, pred_pos, rmse_xy
 
-    # 3D step-endpoint RMSE
-    rmse_3d = np.sqrt(np.mean(np.sum((pred_pos[1:] - gt_anchor_positions) ** 2, axis=1)))
-    print(f"Step-endpoint RMSE (3D): {rmse_3d:.4f} m")
 
-    # XY 기준 step-endpoint RMSE
-    rmse_xy = np.sqrt(
-        np.mean(
-            np.sum((pred_pos[1:, :2] - gt_anchor_positions[:, :2]) ** 2, axis=1)
+def plot_multiple_trajectories(model_path, data_root, device,
+                               norm_mean_path, norm_std_path,
+                               window_len=100, stride=100, max_files=10,
+                               fmt="oxford", use_classifier=True):
+    patch_len = window_len // 10  # 패치 수 10개 고정
+    model     = load_model(model_path, device, use_classifier=use_classifier,
+                           input_len=window_len, patch_len=patch_len)
+    norm_mean = np.load(norm_mean_path)
+    norm_std  = np.load(norm_std_path)
+
+    # 클래스 순서로 정렬: label col 기준
+    label_map = {1:'handbag',2:'handheld',3:'pocket',4:'running',5:'slow',6:'trolley',-1:'noise'}
+    label_order = ['handbag','handheld','pocket','running','slow','trolley','noise']
+    all_files = sorted(Path(data_root).rglob("imu0_resampled.npy"))
+    label_col = 13 if fmt == "oxford" else None
+    def cls_key(p):
+        if label_col is None:
+            return (99, p.name)
+        lbl = int(np.load(p)[0, label_col])
+        name = label_map.get(lbl, 'noise')
+        return (label_order.index(name) if name in label_order else 99, p.name)
+    npy_files = sorted(all_files, key=cls_key)[:max_files]
+    if not npy_files:
+        raise FileNotFoundError(f"{data_root} 아래에서 imu0_resampled.npy를 찾지 못했습니다.")
+
+    n    = len(npy_files)
+    cols = min(5, n)
+    rows = int(np.ceil(n / cols))
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4.2, rows * 4.0))
+    axes = np.array(axes).reshape(-1)
+
+    rmse_list = []
+    for ax, npy_path in zip(axes, npy_files):
+        gt_pos_full, pred_pos, rmse_xy = infer_single_file(
+            model=model, data_path=npy_path, device=device,
+            norm_mean=norm_mean, norm_std=norm_std,
+            stride=stride, fmt=fmt, window_len=window_len,
         )
-    )
-    print(f"Step-endpoint RMSE (XY): {rmse_xy:.4f} m")
+        rmse_list.append(rmse_xy)
 
-    # 11. 2D XY plot
-    fig, ax = plt.subplots(figsize=(10, 8))
+        # origin 기준 정규화
+        origin = gt_pos_full[0].copy()
+        gt   = gt_pos_full - origin
+        pred = pred_pos    - origin
 
-    # GT
-    ax.plot(
-        gt_pos_full[:, 0], gt_pos_full[:, 1],
-        label="GT", color="blue", alpha=0.7, linewidth=2.0
-    )
+        ax.plot(gt[:,0],   gt[:,1],   label="GT",   alpha=0.7, linewidth=2.0)
+        ax.plot(pred[:,0], pred[:,1], label="Pred",  alpha=0.9, linewidth=2.0)
+        ax.scatter(0, 0, marker="o", s=35, label="Start", zorder=5)
+        ax.scatter(gt[-1,0],   gt[-1,1],   marker="x", s=45, label="GT End",   zorder=5)
+        ax.scatter(pred[-1,0], pred[-1,1], marker="^", s=45, label="Pred End", zorder=5)
 
-    # Prediction
-    ax.plot(
-        pred_pos[:, 0], pred_pos[:, 1],
-        label="Prediction", color="red", alpha=0.9, linewidth=2.0
-    )
+        ax.set_title(f"{npy_path.parent.name}\nRMSE_XY={rmse_xy:.3f}m", fontsize=9)
+        ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect("equal", adjustable="box")
 
-    # Start / End points
-    ax.scatter(
-        gt_pos_full[0, 0], gt_pos_full[0, 1],
-        marker="o", s=60, label="Start"
-    )
-    ax.scatter(
-        gt_pos_full[-1, 0], gt_pos_full[-1, 1],
-        marker="x", s=70, label="GT End"
-    )
-    ax.scatter(
-        pred_pos[-1, 0], pred_pos[-1, 1],
-        marker="x", s=70, label="Pred End"
-    )
+    for ax in axes[n:]:
+        ax.axis("off")
 
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
-    ax.set_title(
-        f"Trajectory Reconstruction (XY)\n"
-        f"{Path(data_path).name} | stride={stride} | RMSE_XY={rmse_xy:.3f} m"
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=6, frameon=False)
+    fig.suptitle(
+        f"XY Trajectories | window={window_len}(1s@100Hz) stride={stride} | {n} files | "
+        f"mean RMSE_XY={np.mean(rmse_list):.3f}m", fontsize=13
     )
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_aspect("equal", adjustable="box")
-
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    plt.savefig("inference_result.png", dpi=150)
+    print(f"\n저장: inference_result.png")
+    print(f"파일별 RMSE_XY: {[f'{r:.3f}' for r in rmse_list]}")
+    print(f"평균 RMSE_XY: {np.mean(rmse_list):.3f}m")
     plt.show()
 
 
 if __name__ == "__main__":
-    MODEL_W = "./out_tlio_6ch_128/checkpoints/best.pth"
-    DATA_NPY = "./dataset_split/test/145820422949970/imu0_resampled.npy"
-    NORM_MEAN = "./out_tlio_6ch_128/norm_mean.npy"
-    NORM_STD = "./out_tlio_6ch_128/norm_std.npy"
+    # joint model (out_classifier2, window_len=100) + Oxford test set
+    MODEL_W   = "./out_classifier2/checkpoints/best.pth"
+    DATA_ROOT = "./cls_split_7way/test"
+    NORM_MEAN = "./out_classifier2/norm_mean.npy"
+    NORM_STD  = "./out_classifier2/norm_std.npy"
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    plot_trajectory(
+    plot_multiple_trajectories(
         model_path=MODEL_W,
-        data_path=DATA_NPY,
+        data_root=DATA_ROOT,
         device=DEVICE,
         norm_mean_path=NORM_MEAN,
         norm_std_path=NORM_STD,
-        stride=200,   # non-overlap 권장
+        window_len=100,
+        stride=100,
+        max_files=30,
+        fmt="oxford",
+        use_classifier=True,
     )
