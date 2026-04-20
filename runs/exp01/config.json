@@ -1,0 +1,59 @@
+{
+  "train_dir": "data/train",
+  "val_dir": "data/val",
+  "test_dir": "data/test",
+  "window_len": 100,
+  "train_stride": 10,
+  "eval_stride": 50,
+  "batch_size": 256,
+  "num_workers": 4,
+  "model": {
+    "input_len": 100,
+    "input_channel": 6,
+    "patch_len": 25,
+    "feature_dim": 512,
+    "out_dim": 3,
+    "active_func": "GELU",
+    "extractor": {
+      "name": "ResMLP",
+      "layer_num": 6,
+      "expansion": 2,
+      "dropout": 0.2
+    },
+    "reg": {
+      "name": "MeanMLP",
+      "layer_num": 3
+    },
+    "classifier": {
+      "num_classes": 7,
+      "layer_num": 2,
+      "dropout": 0.3,
+      "pooling_type": "mean"
+    }
+  },
+  "loss": {
+    "cls_weight": 0.3,
+    "label_smoothing": 0.1,
+    "ignore_noise_class": false,
+    "use_class_weights": true
+  },
+  "optimizer": {
+    "name": "AdamW",
+    "lr": 0.001,
+    "weight_decay": 0.0001
+  },
+  "scheduler": {
+    "name": "CosineAnnealingLR",
+    "T_max": 100,
+    "eta_min": 1e-06,
+    "patience": 10,
+    "step_size": 30,
+    "gamma": 0.5
+  },
+  "epochs": 100,
+  "early_stopping": 20,
+  "grad_clip": 1.0,
+  "output_dir": "runs/exp01",
+  "save_every": 10,
+  "log_interval": 50
+}
