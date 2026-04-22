@@ -402,7 +402,7 @@ class ImuMSCKF:
         B[6:9, 3:6] = -Akp1[6:9, 12:15]
 
         # partial integration for state augmentation
-        if t_augmentation_us:
+        if t_augmentation_us is not None:
             # past state propagation (partial integration)
             dtd_us = t_augmentation_us - self.state.s_timestamp_us
             Rd, vd, pd, Ad = propagate_rvt_and_jac(
