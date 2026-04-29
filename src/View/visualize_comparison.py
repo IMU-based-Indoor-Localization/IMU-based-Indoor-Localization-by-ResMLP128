@@ -407,6 +407,17 @@ class TwoLayerImuTracker:
             meas, meas_cov = self.meas_source.get_displacement_measurement(
                 net_gyr_w, net_acc_w
             )
+            # ── 학습/EKF 좌표계 불일치 보정 ─────────────────────────────
+            # 학습 target: Rz(-yaw_BW) @ Δp = Rz(+yaw_WB) @ Δp
+            # EKF update 예측: Rz(-yaw_WB) @ Δp
+            # → network meas에 Rz(-2*yaw_WB) 적용하여 EKF frame으로 변환
+            R_old, _ = self.filter.get_past_state(t_oldest)
+            ri_z = compute_euler_from_matrix(R_old, "xyz", extrinsic=True)[0, 2]
+            c2, s2 = np.cos(-2.0 * ri_z), np.sin(-2.0 * ri_z)
+            Rz2 = np.array([[c2, -s2, 0.0], [s2, c2, 0.0], [0.0, 0.0, 1.0]])
+            meas     = Rz2 @ meas
+            meas_cov = Rz2 @ meas_cov @ Rz2.T
+            # ────────────────────────────────────────────────────────────
             # ── 상태별 W / Q 동적 갱신 ──────────────────────────────────
             state_id    = self.meas_source.last_state_id
             sp          = STATE_EKF_PARAMS.get(state_id, STATE_EKF_PARAMS[-1])
@@ -436,7 +447,8 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
                        use_gt_meas=False,
                        meascov_scale=10.0, sigma_na=np.sqrt(1e-3),
                        sigma_ng=np.sqrt(1e-4), init_vel_sigma=1.0,
-                       ita_ba=1e-4, ita_bg=1e-6):
+                       ita_ba=1e-4, ita_bg=1e-6,
+                       mahalanobis_factor=1.0):
     """ImuTracker 파이프라인으로 EKF 궤적을 반환.
     use_gt_meas=True 이면 네트워크 대신 GT 변위를 측정값으로 사용 (디버그용).
     """
@@ -457,6 +469,7 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
         g_norm              = 9.81,
         meascov_scale       = 1.0,   # 상태별 스케일은 TwoLayerMeasSource 내부에서 적용
         mahalanobis_fail_scale = 0,
+        mahalanobis_factor  = mahalanobis_factor,
     )
 
     device  = next(model.parameters()).device
@@ -784,6 +797,8 @@ def main():
     ap.add_argument("--init_vel_sigma",  type=float, default=1.0)
     ap.add_argument("--ita_ba",          type=float, default=1e-4)
     ap.add_argument("--ita_bg",          type=float, default=1e-6)
+    ap.add_argument("--mahalanobis_factor", type=float, default=1.0,
+                    help="0=게이팅 완전 비활성, 1=기본, >1=임계 완화")
     ap.add_argument("--lap_start", type=float, default=None,
                     help="Figure 2 구간 시작 (초). 예: 63")
     ap.add_argument("--lap_end",   type=float, default=None,
@@ -836,6 +851,7 @@ def main():
         init_vel_sigma=args.init_vel_sigma,
         ita_ba=args.ita_ba,
         ita_bg=args.ita_bg,
+        mahalanobis_factor=args.mahalanobis_factor,
     )
 
     title = Path(args.data_path).parent.name
