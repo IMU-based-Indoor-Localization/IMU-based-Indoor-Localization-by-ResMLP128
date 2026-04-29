@@ -614,73 +614,148 @@ def collect_log_vars(model: TwoLayerModel, data_path: str, device: torch.device,
 
 
 # ---------------------------------------------------------------------------
-# 시각화
+# 시각화 헬퍼
 # ---------------------------------------------------------------------------
-def plot_comparison(gt_pos, net_pos, ekf_pos, win_indices, window_len,
-                    title: str, save_path: str = None):
-    """
-    gt_pos   : [T, 3]  GT (100Hz 전체)
-    net_pos  : [K+1, 3]  Network dead-reckoning (윈도우 단위)
-    ekf_pos  : [T-1, 3]  EKF (100Hz, ts[1]~ts[-1])
-    win_indices : 각 윈도우 시작 샘플 인덱스 (길이 K)
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-    origin = gt_pos[0].copy()
-
-    # --- XY 궤적: 각자 자연스러운 샘플링 그대로 표시 ---
-    gt_xy  = gt_pos[:, :2]  - origin[:2]
-    net_xy = net_pos[:, :2] - origin[:2]
-    ekf_xy = ekf_pos[:, :2] - origin[:2]
-
-    ax = axes[0]
-    ax.plot(gt_xy[:,0],  gt_xy[:,1],  lw=2.0, label="GT",     alpha=0.8,  color="C0")
-    ax.plot(net_xy[:,0], net_xy[:,1], lw=1.8, label="Network", alpha=0.85, color="C1", linestyle="--")
-    ax.plot(ekf_xy[:,0], ekf_xy[:,1], lw=1.8, label="EKF",     alpha=0.85, color="C2", linestyle="-.")
-    ax.scatter(0, 0, s=50, marker="o", zorder=5, color="k", label="Start")
+def _draw_traj_panel(ax, gt_xy, net_xy, ekf_xy, start_label="Start"):
+    ax.plot(gt_xy[:,0],  gt_xy[:,1],  lw=2.0, label="GT",      alpha=0.8,  color="C0")
+    ax.plot(net_xy[:,0], net_xy[:,1], lw=1.8, label="Network",  alpha=0.85, color="C1", linestyle="--")
+    ax.plot(ekf_xy[:,0], ekf_xy[:,1], lw=1.8, label="EKF",      alpha=0.85, color="C2", linestyle="-.")
+    ax.scatter(0, 0, s=50, marker="o", zorder=5, color="k", label=start_label)
     ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
     ax.set_title("XY Trajectory")
     ax.set_aspect("equal", adjustable="box")
     ax.legend(); ax.grid(alpha=0.3)
 
-    # --- 오차: 윈도우 앵커(윈도우 끝 샘플)에서만 비교 ---
-    # anchor_idxs[k] = win_indices[k] + window_len (윈도우 끝 샘플 인덱스)
-    anchor_idxs = np.array([idx + window_len for idx in win_indices])
-    valid = anchor_idxs < len(gt_pos)
-    anchor_idxs = anchor_idxs[valid]
-    K = len(anchor_idxs)
 
-    gt_anchor  = gt_pos[anchor_idxs, :2]  - origin[:2]   # [K, 2]
-    net_anchor = net_pos[1:K+1,     :2]   - origin[:2]   # [K, 2]
-    # ekf_pos[i] = state at ts[i+1], so ekf_pos[anchor_idx-1] = state at ts[anchor_idx]
-    ekf_anchor_idxs = np.clip(anchor_idxs - 1, 0, len(ekf_pos) - 1)
-    ekf_anchor = ekf_pos[ekf_anchor_idxs, :2] - origin[:2]  # [K, 2]
-
-    err_net_xy = np.sqrt(np.sum((net_anchor - gt_anchor)**2, axis=1))
-    err_ekf_xy = np.sqrt(np.sum((ekf_anchor - gt_anchor)**2, axis=1))
-    t_anchors  = anchor_idxs / 100.0  # 100Hz → 초
-
-    ax = axes[1]
-    ax.plot(t_anchors, err_net_xy, lw=1.5, label="Network XY err", color="C1", linestyle="--")
-    ax.plot(t_anchors, err_ekf_xy, lw=1.5, label="EKF XY err",     color="C2", linestyle="-.")
+def _draw_error_panel(ax, t_anchors, err_net, err_ekf):
+    ax.plot(t_anchors, err_net, lw=1.5, label="Network XY err", color="C1", linestyle="--")
+    ax.plot(t_anchors, err_ekf, lw=1.5, label="EKF XY err",     color="C2", linestyle="-.")
     ax.set_xlabel("Time (s)"); ax.set_ylabel("XY Error (m)")
     ax.set_title("Positional Error over Time (window anchors)")
     ax.legend(); ax.grid(alpha=0.3)
 
-    rmse_net = float(np.sqrt(np.mean(err_net_xy**2))) if K > 0 else float("nan")
-    rmse_ekf = float(np.sqrt(np.mean(err_ekf_xy**2))) if K > 0 else float("nan")
-    fig.suptitle(
-        f"{title}\n"
+
+def _compute_anchors(gt_pos, net_pos, ekf_pos, win_indices, window_len, origin,
+                     t_start_idx=0, t_end_idx=None):
+    """anchor 인덱스 계산 및 오차 반환 (시간 범위 슬라이스 지원)."""
+    if t_end_idx is None:
+        t_end_idx = len(gt_pos)
+
+    anchor_idxs = np.array([idx + window_len for idx in win_indices])
+    mask = (anchor_idxs >= t_start_idx) & (anchor_idxs < min(t_end_idx, len(gt_pos)))
+    anchor_idxs = anchor_idxs[mask]
+    net_k_indices = np.where(mask)[0]
+
+    K = len(anchor_idxs)
+    if K == 0:
+        return np.array([]), np.array([]), np.array([])
+
+    gt_anchor  = gt_pos[anchor_idxs, :2]  - origin[:2]
+    net_anchor = net_pos[net_k_indices + 1, :2] - origin[:2]
+    ekf_anchor_idxs = np.clip(anchor_idxs - 1, 0, len(ekf_pos) - 1)
+    ekf_anchor = ekf_pos[ekf_anchor_idxs, :2] - origin[:2]
+
+    err_net = np.sqrt(np.sum((net_anchor - gt_anchor)**2, axis=1))
+    err_ekf = np.sqrt(np.sum((ekf_anchor - gt_anchor)**2, axis=1))
+    t_anch  = anchor_idxs / 100.0
+    return t_anch, err_net, err_ekf
+
+
+# ---------------------------------------------------------------------------
+# 시각화
+# ---------------------------------------------------------------------------
+def plot_comparison(gt_pos, net_pos, ekf_pos, win_indices, window_len,
+                    title: str, save_path: str = None,
+                    lap_start_s: float = None, lap_end_s: float = None):
+    """
+    gt_pos      : [T, 3]    GT (100Hz 전체)
+    net_pos     : [K+1, 3]  Network dead-reckoning (윈도우 단위)
+    ekf_pos     : [T-1, 3]  EKF (100Hz, ts[1]~ts[-1])
+    win_indices : 각 윈도우 시작 샘플 인덱스 (길이 K)
+    lap_start_s / lap_end_s : Figure 2 시간 범위 (초). None이면 Figure 2 생략.
+    """
+    IMU_HZ = 100
+    origin = gt_pos[0].copy()
+
+    # ── Figure 1: 전체 궤적 ──────────────────────────────────────────────────
+    fig1, axes1 = plt.subplots(1, 2, figsize=(14, 6))
+
+    gt_xy  = gt_pos[:, :2]  - origin[:2]
+    net_xy = net_pos[:, :2] - origin[:2]
+    ekf_xy = ekf_pos[:, :2] - origin[:2]
+    _draw_traj_panel(axes1[0], gt_xy, net_xy, ekf_xy)
+
+    t_anch, err_net, err_ekf = _compute_anchors(
+        gt_pos, net_pos, ekf_pos, win_indices, window_len, origin)
+    _draw_error_panel(axes1[1], t_anch, err_net, err_ekf)
+
+    rmse_net = float(np.sqrt(np.mean(err_net**2))) if len(err_net) > 0 else float("nan")
+    rmse_ekf = float(np.sqrt(np.mean(err_ekf**2))) if len(err_ekf) > 0 else float("nan")
+    fig1.suptitle(
+        f"{title} — Full trajectory\n"
         f"RMSE_XY — Network: {rmse_net:.3f} m | EKF: {rmse_ekf:.3f} m",
-        fontsize=12
+        fontsize=12,
     )
     plt.tight_layout()
-
     if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"저장: {save_path}")
-    plt.show()
+        fig1.savefig(save_path, dpi=150)
+        print(f"저장 (Fig1): {save_path}")
 
+    # ── Figure 2: 선택 구간 ──────────────────────────────────────────────────
+    if lap_start_s is not None and lap_end_s is not None:
+        s_idx = max(0, int(lap_start_s * IMU_HZ))
+        e_idx = min(len(gt_pos), int(lap_end_s * IMU_HZ))
+        lap_origin = gt_pos[s_idx].copy()
+
+        gt_lap  = gt_pos[s_idx:e_idx, :2] - lap_origin[:2]
+        ekf_s   = max(0, s_idx - 1)
+        ekf_e   = max(0, e_idx - 1)
+        ekf_lap = ekf_pos[ekf_s:ekf_e, :2] - lap_origin[:2]
+
+        anchor_all = np.array([idx + window_len for idx in win_indices])
+        lap_mask   = (anchor_all >= s_idx) & (anchor_all < e_idx)
+        net_k_idx  = np.where(lap_mask)[0]
+        if len(net_k_idx) > 0:
+            first_gt  = gt_pos[anchor_all[net_k_idx[0]], :2]
+            first_net = net_pos[net_k_idx[0], :2]
+            net_offset = first_gt - first_net
+            net_lap = net_pos[net_k_idx, :2] + net_offset - lap_origin[:2]
+        else:
+            net_lap = np.empty((0, 2))
+
+        fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6))
+
+        ax2 = axes2[0]
+        ax2.plot(gt_lap[:,0],  gt_lap[:,1],  lw=2.0, label="GT",      alpha=0.8,  color="C0")
+        if len(net_lap) > 0:
+            ax2.plot(net_lap[:,0], net_lap[:,1], lw=1.8, label="Network", alpha=0.85, color="C1", linestyle="--")
+        ax2.plot(ekf_lap[:,0], ekf_lap[:,1], lw=1.8, label="EKF",      alpha=0.85, color="C2", linestyle="-.")
+        ax2.scatter(0, 0, s=50, marker="o", zorder=5, color="k", label=f"t={lap_start_s:.0f}s")
+        ax2.set_xlabel("X (m)"); ax2.set_ylabel("Y (m)")
+        ax2.set_title(f"XY Trajectory  [{lap_start_s:.0f}s – {lap_end_s:.0f}s]")
+        ax2.set_aspect("equal", adjustable="box")
+        ax2.legend(); ax2.grid(alpha=0.3)
+
+        t_anch2, err_net2, err_ekf2 = _compute_anchors(
+            gt_pos, net_pos, ekf_pos, win_indices, window_len, gt_pos[s_idx],
+            t_start_idx=s_idx, t_end_idx=e_idx,
+        )
+        _draw_error_panel(axes2[1], t_anch2, err_net2, err_ekf2)
+
+        rmse_net2 = float(np.sqrt(np.mean(err_net2**2))) if len(err_net2) > 0 else float("nan")
+        rmse_ekf2 = float(np.sqrt(np.mean(err_ekf2**2))) if len(err_ekf2) > 0 else float("nan")
+        fig2.suptitle(
+            f"{title} — Lap [{lap_start_s:.0f}s – {lap_end_s:.0f}s]\n"
+            f"RMSE_XY — Network: {rmse_net2:.3f} m | EKF: {rmse_ekf2:.3f} m",
+            fontsize=12,
+        )
+        plt.tight_layout()
+        if save_path:
+            lap_save = save_path.replace(".png", f"_lap{lap_start_s:.0f}-{lap_end_s:.0f}.png")
+            fig2.savefig(lap_save, dpi=150)
+            print(f"저장 (Fig2): {lap_save}")
+
+    plt.show()
     return rmse_net, rmse_ekf
 
 
@@ -709,6 +784,10 @@ def main():
     ap.add_argument("--init_vel_sigma",  type=float, default=1.0)
     ap.add_argument("--ita_ba",          type=float, default=1e-4)
     ap.add_argument("--ita_bg",          type=float, default=1e-6)
+    ap.add_argument("--lap_start", type=float, default=None,
+                    help="Figure 2 구간 시작 (초). 예: 63")
+    ap.add_argument("--lap_end",   type=float, default=None,
+                    help="Figure 2 구간 끝   (초). 예: 126")
     args = ap.parse_args()
 
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -765,6 +844,8 @@ def main():
         gt_pos, net_pos, ekf_pos,
         win_indices, args.window_len,
         title, save_path,
+        lap_start_s=args.lap_start,
+        lap_end_s=args.lap_end,
     )
     print(f"\nRMSE_XY  Network: {rmse_net:.3f} m  |  EKF: {rmse_ekf:.3f} m")
 
