@@ -27,8 +27,8 @@ TLIO-master/
 # (best.pth 만 보존 — 아래 예외 처리)
 src/Network/out_*/checkpoints/epoch_*.pth
 
-# ResNet1D-Full: best.pth 도 58 MB 로 GitHub 권장 한도(50 MB) 초과
-src/Network/out_resnet/checkpoints/
+# ResNet1D-Full: best.pth(58MB)는 GitHub 100MB 한도 이하이므로 포함
+# epoch_*.pth 는 위의 공통 규칙으로 이미 제외됨
 
 # ─────────────────────────────────────────────
 # IDE / OS
