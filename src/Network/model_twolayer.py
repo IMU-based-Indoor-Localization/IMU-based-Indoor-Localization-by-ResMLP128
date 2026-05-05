@@ -228,13 +228,15 @@ class TwoLayerModel(nn.Module):
             pose_logits = self.pose_classifier(feature)    # [B, C]
             pred_info = F.softmax(pose_logits, dim=-1)
             if pose_labels is not None and self.training and tf_ratio > 0.0:
-                gt_info = F.one_hot(pose_labels,
-                                    num_classes=self.num_classes).float()
+                # label < 0 (TLIO 등 레이블 없는 샘플)은 predicted softmax 사용
+                valid       = pose_labels >= 0
+                safe_labels = pose_labels.clamp(min=0)   # one_hot 인덱스 오류 방지
+                gt_info     = F.one_hot(safe_labels, num_classes=self.num_classes).float()
                 if tf_ratio >= 1.0:
-                    pose_info = gt_info
+                    pose_info = torch.where(valid[:, None], gt_info, pred_info)
                 else:
-                    use_gt = (torch.rand(x.size(0), 1, device=x.device) < tf_ratio)
-                    pose_info = torch.where(use_gt, gt_info, pred_info)
+                    use_gt    = torch.rand(x.size(0), 1, device=x.device) < tf_ratio
+                    pose_info = torch.where(valid[:, None] & use_gt, gt_info, pred_info)
             else:
                 pose_info = pred_info
             y, y_cov = self.reg(feature, pose_info)
