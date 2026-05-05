@@ -47,13 +47,17 @@ G_NORM = 9.81  # m/s²
 STATE_EKF_PARAMS = {
     # state_id: dict(meascov_scale, sigma_na, sigma_ng, ita_ba, ita_bg)
     # None 값은 run_ekf_imutracker 의 전역 파라미터를 그대로 사용함
+    # meascov_scale 은 ekf_tune.py 그리드 서치로 자동 튜닝된 값 (2026-05-05)
     -1: dict(meascov_scale=0.001,  sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # unknown
-    1:  dict(meascov_scale=0.05,   sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # handbag
-    2:  dict(meascov_scale=0.01,   sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # handheld
-    3:  dict(meascov_scale=0.005,  sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # pocket
-    4:  dict(meascov_scale=0.05,   sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # running
-    5:  dict(meascov_scale=0.005,  sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # slow-walking
-    6:  dict(meascov_scale=0.02,   sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # trolley
+    1:  dict(meascov_scale=0.001,  sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # handbag
+    2:  dict(meascov_scale=0.001,  sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # handheld
+    3:  dict(meascov_scale=0.001,  sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # pocket
+    4:  dict(meascov_scale=0.01,   sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # running
+    5:  dict(meascov_scale=1.0,    sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # slow-walking
+    6:  dict(meascov_scale=0.001,  sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # trolley
+    7:  dict(meascov_scale=0.001,  sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # multi_devices
+    8:  dict(meascov_scale=0.01,   sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # multi_users
+    9:  dict(meascov_scale=0.1,    sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # large_scale
 }
 
 
@@ -227,12 +231,17 @@ class TwoLayerMeasSource:
     """ImuTracker._process_update 가 호출하는 get_displacement_measurement 인터페이스."""
 
     def __init__(self, model: TwoLayerModel, norm_mean: np.ndarray,
-                 norm_std: np.ndarray, device: torch.device):
-        self.model     = model
-        self.norm_mean = norm_mean.astype(np.float32)  # [6]
-        self.norm_std  = norm_std.astype(np.float32)   # [6]
-        self.device    = device
-        self.last_state_id = -1   # 마지막 추론에서 예측한 상태 ID
+                 norm_std: np.ndarray, device: torch.device,
+                 forced_state_id: int = None,
+                 meascov_override: float = None):
+        self.model            = model
+        self.norm_mean        = norm_mean.astype(np.float32)  # [6]
+        self.norm_std         = norm_std.astype(np.float32)   # [6]
+        self.device           = device
+        self.last_state_id    = -1   # 마지막 추론에서 예측한 상태 ID
+        # Method-B: 외부에서 상태 ID 주입 (classifier 없는 모델 대응)
+        self.forced_state_id  = forced_state_id   # None → 모델 classifier 결과 사용
+        self.meascov_override = meascov_override  # None → STATE_EKF_PARAMS 값 사용
 
     @torch.no_grad()
     def get_displacement_measurement(self, net_gyr_w: np.ndarray,
@@ -257,12 +266,22 @@ class TwoLayerMeasSource:
         meas = y_hat[0].cpu().numpy().reshape(3, 1)
         lv   = np.clip(log_var[0].cpu().numpy(), -4.0, 4.0)
 
-        # 예측 상태 (0-based argmax → 1-based 상태 ID) 저장 (외부에서 읽을 수 있도록)
-        pred_class = int(class_logits[0].argmax().item()) + 1  # 1~7
-        state_id   = pred_class if pred_class in STATE_EKF_PARAMS else -1
+        # 상태 ID 결정: forced_state_id → classifier 출력 → unknown(-1) 순으로 fallback
+        if self.forced_state_id is not None:
+            state_id = self.forced_state_id
+        elif class_logits is not None:
+            pred_class = int(class_logits[0].argmax().item()) + 1  # 1~7
+            state_id   = pred_class if pred_class in STATE_EKF_PARAMS else -1
+        else:
+            state_id = -1
         self.last_state_id = state_id
 
-        meascov_scale = STATE_EKF_PARAMS[state_id]["meascov_scale"]
+        # meascov_scale: meascov_override → STATE_EKF_PARAMS 순으로 fallback
+        if self.meascov_override is not None:
+            meascov_scale = self.meascov_override
+        else:
+            meascov_scale = STATE_EKF_PARAMS.get(state_id,
+                                STATE_EKF_PARAMS[-1])["meascov_scale"]
         meas_cov = meascov_scale * np.diag(np.exp(lv).astype(np.float64))
 
         return meas, meas_cov
@@ -276,7 +295,9 @@ class TwoLayerImuTracker:
 
     def __init__(self, model: TwoLayerModel, norm_mean: np.ndarray,
                  norm_std: np.ndarray, filter_tuning_cfg,
-                 update_freq: float = 1.0, device: torch.device = None):
+                 update_freq: float = 1.0, device: torch.device = None,
+                 forced_state_id: int = None,
+                 meascov_override: float = None):
         if device is None:
             device = next(model.parameters()).device
 
@@ -300,7 +321,9 @@ class TwoLayerImuTracker:
         self._default_ita_bg   = filter_tuning_cfg.ita_bg
 
         self.filter      = ImuMSCKF(filter_tuning_cfg)
-        self.meas_source = TwoLayerMeasSource(model, norm_mean, norm_std, device)
+        self.meas_source = TwoLayerMeasSource(model, norm_mean, norm_std, device,
+                                              forced_state_id=forced_state_id,
+                                              meascov_override=meascov_override)
         self.imu_buffer  = ImuBuffer()
 
         self.callback_first_update    = None
@@ -436,7 +459,8 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
                        use_gt_meas=False,
                        meascov_scale=10.0, sigma_na=np.sqrt(1e-3),
                        sigma_ng=np.sqrt(1e-4), init_vel_sigma=1.0,
-                       ita_ba=1e-4, ita_bg=1e-6):
+                       ita_ba=1e-4, ita_bg=1e-6,
+                       forced_state_id=None, meascov_override=None):
     """ImuTracker 파이프라인으로 EKF 궤적을 반환.
     use_gt_meas=True 이면 네트워크 대신 GT 변위를 측정값으로 사용 (디버그용).
     """
@@ -461,7 +485,9 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
 
     device  = next(model.parameters()).device
     tracker = TwoLayerImuTracker(model, norm_mean, norm_std, ekf_cfg,
-                                 update_freq=1.0, device=device)
+                                 update_freq=1.0, device=device,
+                                 forced_state_id=forced_state_id,
+                                 meascov_override=meascov_override)
 
     # GT 측정값 콜백 (디버그)
     if use_gt_meas:
