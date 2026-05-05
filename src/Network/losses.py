@@ -97,8 +97,13 @@ class CombinedLoss(nn.Module):
             l_dir = torch.zeros(1, device=y_hat.device)[0]
 
         # 분류 손실 (pose_logits=None이면 skip — LLIO 논문 원본 모드)
+        # label < 0 인 샘플(TLIO golden 등 레이블 없는 데이터)은 마스킹
         if pose_logits is not None and self.cls_weight > 0.0:
-            l_cls = self.cls(pose_logits, pose_labels)
+            valid = pose_labels >= 0
+            if valid.any():
+                l_cls = self.cls(pose_logits[valid], pose_labels[valid])
+            else:
+                l_cls = torch.zeros(1, device=y_hat.device)[0]
         else:
             l_cls = torch.zeros(1, device=y_hat.device)[0]
 

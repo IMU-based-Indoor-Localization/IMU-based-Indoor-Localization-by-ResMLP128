@@ -34,11 +34,11 @@ NUM_CLASSES  = 7
 
 DEFAULT_CONFIG = {
     # --- 데이터셋 설정 ---
-    "train_dir": "cls_split_7way/train",
-    "val_dir":   "cls_split_7way/val",
-    "test_dir":  "cls_split_7way/test",
+    "train_dir": "oxford_split/train",
+    "val_dir":   "oxford_split/val",
+    "test_dir":  "oxford_split/test",
     "fmt":        "oxford",   # "tlio" | "oxford"
-    "with_label": True,       # Oxford joint training
+    "with_label": False,      # regression only (분류 레이블 불필요)
 
     "window_len":   100,   # Oxford 100Hz × 1s = TLIO 200Hz × 1s 와 동일 시간
     "train_stride": 10,
@@ -57,10 +57,16 @@ DEFAULT_CONFIG = {
         "active_func":   "GELU",
 
         "extractor": {"name": "ResMLP", "layer_num": 6, "expansion": 2, "dropout": 0.2},
-        "reg":       {"name": "PoseCondMean", "layer_num": 3, "dropout": 0.2},
+        "reg":       {"name": "SimpleMean", "layer_num": 3, "dropout": 0.2},
         "classifier": {"num_classes": 7, "layer_num": 2, "dropout": 0.3, "pooling_type": "mean"},
-        "use_classifier": True,
+        "use_classifier": False,
     },
+
+    # --- TLIO golden 증강 데이터 ---
+    # TLIO-master golden-new-format 데이터를 학습 시 Oxford 데이터와 혼합.
+    # None 으로 설정하면 Oxford 데이터만 사용.
+    "tlio_aug_dir":    r"C:\Users\hs091\Desktop\TLIO-master\golden-new-format-cc-by-nc-with-imus",
+    "tlio_aug_stride": 10,
 
     # --- 사전학습 가중치 ---
     # extractor: 회귀 모델에서 이식 / cls_head: standalone 분류기에서 이식
@@ -69,10 +75,10 @@ DEFAULT_CONFIG = {
 
     # --- 손실 함수 설정 ---
     "loss": {
-        "cls_weight":       0.3,   # regression + 0.3 * classification
+        "cls_weight":       0.0,   # regression only
         "dir_weight":       0.0,
-        "label_smoothing":  0.05,
-        "use_class_weights": True,
+        "label_smoothing":  0.0,
+        "use_class_weights": False,
         "mse_epochs":       30,    # 초반 MSE로 회귀 안정화 후 NLL 전환
     },
 
@@ -85,7 +91,7 @@ DEFAULT_CONFIG = {
     "log_interval": 50,
     "save_every": 10,
     "early_stopping": 30,
-    "output_dir": "out_classifier",
+    "output_dir": "out_regression",
 }
 
 
@@ -296,6 +302,8 @@ def train(cfg):
         train_stride=cfg["train_stride"], eval_stride=cfg["eval_stride"],
         batch_size=cfg["batch_size"], num_workers=cfg["num_workers"],
         fmt=fmt, with_label=with_label,
+        tlio_aug_dir=cfg.get("tlio_aug_dir"),
+        tlio_aug_stride=cfg.get("tlio_aug_stride", 10),
     )
     train_loader = loaders["train"]; val_loader = loaders["val"]
     test_loader = loaders.get("test")
