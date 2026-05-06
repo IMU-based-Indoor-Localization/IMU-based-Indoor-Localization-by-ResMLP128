@@ -51,10 +51,11 @@ from visualize_comparison import (
 )
 
 # ── 설정 ──────────────────────────────────────────────────────────────
-MODEL_DIR    = _SRC / "Network" / "out_regression"
-OXFORD_SPLIT = _SRC / "Network" / "oxford_split"
-OUTPUT_DIR   = _ROOT / "doc" / "ekf_compare"
-WINDOW_LEN   = 100
+MODEL_DIR     = _SRC / "Network" / "out_regression"    # no-classifier 회귀 모델
+CLS_MODEL_DIR = _SRC / "outputs" / "out_classifier2"   # classifier + 회귀 통합 모델
+OXFORD_SPLIT  = _SRC / "Network" / "oxford_split"
+OUTPUT_DIR    = _ROOT / "doc" / "ekf_compare"
+WINDOW_LEN    = 100
 
 # 카테고리 → state_id 매핑 (visualize_comparison.py 의 STATE_EKF_PARAMS 와 일치)
 CATEGORY_TO_STATE: dict[str, int] = {
@@ -82,6 +83,21 @@ GRID_MEASCOV = [
 # ── 모델 로드 ─────────────────────────────────────────────────────────
 def load_regression_model(model_dir: Path, device: torch.device):
     """out_regression (use_classifier=False, SimpleMean) 모델 로드."""
+    with open(model_dir / "config.json") as f:
+        cfg = json.load(f)
+    model_cfg = cfg["model"]
+    model = TwoLayerModel(model_cfg).to(device)
+    ck = torch.load(model_dir / "checkpoints" / "best.pth",
+                    map_location=device, weights_only=False)
+    model.load_state_dict(ck["model"])
+    model.eval()
+    mean = np.load(model_dir / "norm_mean.npy")
+    std  = np.load(model_dir / "norm_std.npy")
+    return model, mean, std
+
+
+def load_classifier_model(model_dir: Path, device: torch.device):
+    """out_classifier2 (use_classifier=True, PoseCondMean) 모델 로드."""
     with open(model_dir / "config.json") as f:
         cfg = json.load(f)
     model_cfg = cfg["model"]
@@ -212,11 +228,22 @@ def main():
 
     print(">> ResMLP128 (out_regression) 로드...")
     model, norm_mean, norm_std = load_regression_model(MODEL_DIR, device)
-    print("  [OK]\n")
+    print("  [OK]")
+
+    cls_model = cls_mean = cls_std = None
+    if CLS_MODEL_DIR.exists():
+        print(">> out_classifier2 (soft-switching 용) 로드...")
+        try:
+            cls_model, cls_mean, cls_std = load_classifier_model(CLS_MODEL_DIR, device)
+            print("  [OK]\n")
+        except Exception as e:
+            print(f"  [WARN] 로드 실패: {e} → soft-switching 생략\n")
+    else:
+        print(f"  [WARN] {CLS_MODEL_DIR} 없음 → soft-switching 생략\n")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    results = []  # (category, seq_name, split, best_scale, rmse_net, rmse_ekf, grid_log)
+    results = []  # (cat, seq, split, best_scale, rmse_net, rmse_ekf, rmse_gtyaw, rmse_gtmeas, rmse_gtyawnorm, rmse_soft, grid_log)
 
     for cat in CATEGORIES:
         npy_path, seq_name, split = find_sequence(cat)
@@ -333,28 +360,45 @@ def main():
         except Exception as e:
             print(f"  [!] 시각화 실패: {e}")
 
+        # ── Soft Switching EKF (out_classifier2 + Context-Aware) ─────────
+        rmse_soft = float("nan")
+        if cls_model is not None:
+            try:
+                ekf_pos_soft = run_ekf_imutracker(
+                    ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
+                    cls_model, cls_mean, cls_std, WINDOW_LEN,
+                    mahalanobis_fail_scale=10.0,
+                    use_soft_switching=True,   # Context-Aware Soft Switching
+                )
+                rmse_soft = compute_rmse_xy_anchor(ekf_pos_soft, pos_gt, list(win_indices))
+                print(f"  >> Soft-Switch EKF:    RMSE_XY={rmse_soft:.4f} m "
+                      f"(vs network={rmse_net:.4f} m, EKF={best_rmse:.4f} m)")
+            except Exception as e:
+                print(f"  [!] Soft-Switch 실패: {e}")
+
         results.append((cat, seq_name, split, best_scale,
-                        rmse_net, best_rmse, rmse_gt_yaw, rmse_gt_meas, rmse_gt_yaw_norm, grid_log))
+                        rmse_net, best_rmse, rmse_gt_yaw, rmse_gt_meas, rmse_gt_yaw_norm, rmse_soft, grid_log))
         print()
 
     # ── 결과 요약 테이블 ─────────────────────────────────────────────
-    print("\n" + "=" * 113)
+    print("\n" + "=" * 128)
     print(f"{'Category':<18} {'Split':<6} {'StateID':>7} {'Best Scale':>11} "
-          f"{'Net RMSE':>10} {'EKF RMSE':>10} {'GT-Meas':>9} {'GT-YawNorm':>11}  {'Improve':>8}")
-    print("-" * 113)
-    for cat, seq, split, scale, r_net, r_ekf, r_gtyaw, r_gtmeas, r_gtyawnorm, _ in results:
+          f"{'Net RMSE':>10} {'EKF RMSE':>10} {'Soft-EKF':>10} {'GT-Meas':>9} {'GT-YawNorm':>11}  {'Improve':>8}")
+    print("-" * 128)
+    for cat, seq, split, scale, r_net, r_ekf, r_gtyaw, r_gtmeas, r_gtyawnorm, r_soft, _ in results:
         sid  = CATEGORY_TO_STATE.get(cat, -1)
         diff = r_net - r_ekf          # positive = EKF better
         mark = " [+]" if diff > 0 else " [-]"
-        gtmeas_str    = f"{r_gtmeas:>9.4f}"    if not np.isnan(r_gtmeas)    else f"{'N/A':>9}"
-        gtyawnorm_str = f"{r_gtyawnorm:>11.4f}" if not np.isnan(r_gtyawnorm) else f"{'N/A':>11}"
+        soft_str      = f"{r_soft:>10.4f}"      if not np.isnan(r_soft)      else f"{'N/A':>10}"
+        gtmeas_str    = f"{r_gtmeas:>9.4f}"     if not np.isnan(r_gtmeas)    else f"{'N/A':>9}"
+        gtyawnorm_str = f"{r_gtyawnorm:>11.4f}"  if not np.isnan(r_gtyawnorm) else f"{'N/A':>11}"
         print(f"{cat:<18} {split:<6} {sid:>7} {scale:>11.4g} "
-              f"{r_net:>10.4f} {r_ekf:>10.4f} {gtmeas_str} {gtyawnorm_str}  {diff:>+7.4f}{mark}")
-    print("=" * 113)
+              f"{r_net:>10.4f} {r_ekf:>10.4f} {soft_str} {gtmeas_str} {gtyawnorm_str}  {diff:>+7.4f}{mark}")
+    print("=" * 128)
 
     # ── 업데이트된 STATE_EKF_PARAMS 코드 ────────────────────────────
     state_to_cat = {v: k for k, v in CATEGORY_TO_STATE.items()}
-    cat_to_scale = {cat: scale for cat, _, _, scale, _, _, _, _, _, _ in results}
+    cat_to_scale = {cat: scale for cat, _, _, scale, _, _, _, _, _, _, _ in results}
 
     labels = {
         -1: "unknown",      1: "handbag",   2: "handheld",
