@@ -233,15 +233,19 @@ class TwoLayerMeasSource:
     def __init__(self, model: TwoLayerModel, norm_mean: np.ndarray,
                  norm_std: np.ndarray, device: torch.device,
                  forced_state_id: int = None,
-                 meascov_override: float = None):
-        self.model            = model
-        self.norm_mean        = norm_mean.astype(np.float32)  # [6]
-        self.norm_std         = norm_std.astype(np.float32)   # [6]
-        self.device           = device
-        self.last_state_id    = -1   # 마지막 추론에서 예측한 상태 ID
+                 meascov_override: float = None,
+                 use_soft_switching: bool = True):
+        self.model              = model
+        self.norm_mean          = norm_mean.astype(np.float32)  # [6]
+        self.norm_std           = norm_std.astype(np.float32)   # [6]
+        self.device             = device
+        self.last_state_id      = -1   # 마지막 추론에서 예측한 상태 ID
         # Method-B: 외부에서 상태 ID 주입 (classifier 없는 모델 대응)
-        self.forced_state_id  = forced_state_id   # None → 모델 classifier 결과 사용
-        self.meascov_override = meascov_override  # None → STATE_EKF_PARAMS 값 사용
+        self.forced_state_id    = forced_state_id   # None → 모델 classifier 결과 사용
+        self.meascov_override   = meascov_override  # None → STATE_EKF_PARAMS 값 사용
+        # Context-Aware Soft Switching: True → softmax 확률 가중 보간,
+        #                               False → argmax hard switching
+        self.use_soft_switching = use_soft_switching
 
     @torch.no_grad()
     def get_displacement_measurement(self, net_gyr_w: np.ndarray,
@@ -266,22 +270,43 @@ class TwoLayerMeasSource:
         meas = y_hat[0].cpu().numpy().reshape(3, 1)
         lv   = np.clip(log_var[0].cpu().numpy(), -4.0, 4.0)
 
-        # 상태 ID 결정: forced_state_id → classifier 출력 → unknown(-1) 순으로 fallback
-        if self.forced_state_id is not None:
-            state_id = self.forced_state_id
-        elif class_logits is not None:
-            pred_class = int(class_logits[0].argmax().item()) + 1  # 1~7
-            state_id   = pred_class if pred_class in STATE_EKF_PARAMS else -1
-        else:
-            state_id = -1
-        self.last_state_id = state_id
-
-        # meascov_scale: meascov_override → STATE_EKF_PARAMS 순으로 fallback
+        # ── meascov_scale 결정 (우선순위: override > forced > soft/hard switching) ──
         if self.meascov_override is not None:
+            # 그리드 서치 등 외부 고정 스케일
             meascov_scale = self.meascov_override
+            if self.forced_state_id is not None:
+                self.last_state_id = self.forced_state_id
+            elif class_logits is not None:
+                pred_class = int(class_logits[0].argmax().item()) + 1
+                self.last_state_id = pred_class if pred_class in STATE_EKF_PARAMS else -1
+            else:
+                self.last_state_id = -1
+        elif self.forced_state_id is not None:
+            # Method-B: 시퀀스 파일명 기반 고정 state_id (classifier 없는 모델 대응)
+            self.last_state_id = self.forced_state_id
+            meascov_scale = STATE_EKF_PARAMS.get(
+                self.forced_state_id, STATE_EKF_PARAMS[-1])["meascov_scale"]
+        elif class_logits is not None and self.use_soft_switching:
+            # ── Context-Aware Soft Switching ──────────────────────────────
+            # softmax 확률을 가중치로 각 상태의 meascov_scale 을 선형 보간:
+            #   meascov_scale = Σ_k  p_k * scale_k
+            probs = torch.softmax(class_logits[0], dim=0).cpu().numpy()   # [K]
+            meascov_scale = float(sum(
+                probs[k] * STATE_EKF_PARAMS.get(k + 1, STATE_EKF_PARAMS[-1])["meascov_scale"]
+                for k in range(len(probs))
+            ))
+            pred_class = int(class_logits[0].argmax().item()) + 1
+            self.last_state_id = pred_class if pred_class in STATE_EKF_PARAMS else -1
+        elif class_logits is not None:
+            # Hard Switching: argmax 클래스에 해당하는 고정 scale 사용
+            pred_class = int(class_logits[0].argmax().item()) + 1
+            state_id   = pred_class if pred_class in STATE_EKF_PARAMS else -1
+            self.last_state_id = state_id
+            meascov_scale = STATE_EKF_PARAMS.get(state_id, STATE_EKF_PARAMS[-1])["meascov_scale"]
         else:
-            meascov_scale = STATE_EKF_PARAMS.get(state_id,
-                                STATE_EKF_PARAMS[-1])["meascov_scale"]
+            # classifier 없는 모델 (state_id=-1, 기본 스케일 사용)
+            self.last_state_id = -1
+            meascov_scale = STATE_EKF_PARAMS[-1]["meascov_scale"]
         meas_cov = meascov_scale * np.diag(np.exp(lv).astype(np.float64))
 
         return meas, meas_cov
@@ -299,7 +324,8 @@ class TwoLayerImuTracker:
                  forced_state_id: int = None,
                  meascov_override: float = None,
                  gt_quat: np.ndarray = None,
-                 gt_ts_us: np.ndarray = None):
+                 gt_ts_us: np.ndarray = None,
+                 use_soft_switching: bool = True):
         if device is None:
             device = next(model.parameters()).device
 
@@ -329,7 +355,8 @@ class TwoLayerImuTracker:
         self.filter      = ImuMSCKF(filter_tuning_cfg)
         self.meas_source = TwoLayerMeasSource(model, norm_mean, norm_std, device,
                                               forced_state_id=forced_state_id,
-                                              meascov_override=meascov_override)
+                                              meascov_override=meascov_override,
+                                              use_soft_switching=use_soft_switching)
         self.imu_buffer  = ImuBuffer()
 
         self.callback_first_update    = None
@@ -502,7 +529,8 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
                        forced_state_id=None, meascov_override=None,
                        mahalanobis_fail_scale=10.0,
                        gt_yaw_inject=False,
-                       use_gt_yaw_norm=False):
+                       use_gt_yaw_norm=False,
+                       use_soft_switching: bool = True):
     """ImuTracker 파이프라인으로 EKF 궤적을 반환.
     use_gt_meas=True     : 네트워크 대신 GT 변위를 측정값으로 사용 (디버그)
     use_gt_yaw_norm=True : 측정 프레임 yaw 정규화에 GT quat 사용 (Method-E 진단)
@@ -534,6 +562,7 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
         meascov_override=meascov_override,
         gt_quat=(quat  if use_gt_yaw_norm else None),
         gt_ts_us=(ts_us if use_gt_yaw_norm else None),
+        use_soft_switching=use_soft_switching,
     )
 
     # GT 측정값 콜백 (디버그)
