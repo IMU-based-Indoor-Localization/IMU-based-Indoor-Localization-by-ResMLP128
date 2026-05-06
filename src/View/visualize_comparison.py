@@ -297,7 +297,9 @@ class TwoLayerImuTracker:
                  norm_std: np.ndarray, filter_tuning_cfg,
                  update_freq: float = 1.0, device: torch.device = None,
                  forced_state_id: int = None,
-                 meascov_override: float = None):
+                 meascov_override: float = None,
+                 gt_quat: np.ndarray = None,
+                 gt_ts_us: np.ndarray = None):
         if device is None:
             device = next(model.parameters()).device
 
@@ -319,6 +321,10 @@ class TwoLayerImuTracker:
         self._default_sigma_ng = filter_tuning_cfg.sigma_ng
         self._default_ita_ba   = filter_tuning_cfg.ita_ba
         self._default_ita_bg   = filter_tuning_cfg.ita_bg
+
+        # Method-E: GT quaternion yaw 를 측정 프레임 정규화에 사용 (진단 전용)
+        self.gt_quat   = gt_quat    # [T, 4] xyzw  None → EKF 추정 rotation 사용 (기본)
+        self.gt_ts_us  = gt_ts_us   # [T]   타임스탬프 (μs)
 
         self.filter      = ImuMSCKF(filter_tuning_cfg)
         self.meas_source = TwoLayerMeasSource(model, norm_mean, norm_std, device,
@@ -386,7 +392,13 @@ class TwoLayerImuTracker:
             net_tus_begin, net_tus_end
         )
         R_oldest_wfb, _ = self.filter.get_past_state(t_oldest_state_us)
-        ri_z = compute_euler_from_matrix(R_oldest_wfb, "xyz", extrinsic=True)[0, 2]
+        if self.gt_quat is not None and self.gt_ts_us is not None:
+            # Method-E: GT quaternion 의 yaw 로 정규화 (EKF yaw drift 무력화)
+            idx_old = int(np.searchsorted(self.gt_ts_us, t_oldest_state_us))
+            idx_old = min(idx_old, len(self.gt_quat) - 1)
+            ri_z = R.from_quat(self.gt_quat[idx_old]).as_euler("zyx", degrees=False)[0]
+        else:
+            ri_z = compute_euler_from_matrix(R_oldest_wfb, "xyz", extrinsic=True)[0, 2]
         Ri_z = np.array([
             [ np.cos(ri_z), -np.sin(ri_z), 0],
             [ np.sin(ri_z),  np.cos(ri_z), 0],
@@ -454,15 +466,46 @@ class TwoLayerImuTracker:
 # ---------------------------------------------------------------------------
 # EKF 실행 (ImuTracker 기반)
 # ---------------------------------------------------------------------------
+def _correct_yaw_to_gt(filter_state, ts_us, quat, t_idx):
+    """EKF 의 evolving state + 모든 augmented state 의 yaw 를 GT 쿼터니언으로 교정.
+    pitch/roll 은 EKF 추정값 유지, yaw 만 GT 로 덮어씀.
+    """
+    def _yaw_of_R(Rmat):
+        return R.from_matrix(Rmat).as_euler("zyx", degrees=False)[0]
+
+    def _apply_delta_yaw(Rmat, delta):
+        cd, sd = np.cos(delta), np.sin(delta)
+        Rz = np.array([[cd, -sd, 0.], [sd, cd, 0.], [0., 0., 1.]])
+        return Rz @ Rmat
+
+    # ── evolving state 교정
+    yaw_gt_now = R.from_quat(quat[min(t_idx, len(quat) - 1)]).as_euler("zyx", degrees=False)[0]
+    delta = yaw_gt_now - _yaw_of_R(filter_state.s_R)
+    filter_state.s_R = _apply_delta_yaw(filter_state.s_R, delta)
+
+    # ── augmented states 교정
+    for k in range(len(filter_state.si_Rs)):
+        t_k   = filter_state.si_timestamps_us[k]
+        idx_k = int(np.searchsorted(ts_us, t_k))
+        idx_k = min(idx_k, len(quat) - 1)
+        yaw_gt_k = R.from_quat(quat[idx_k]).as_euler("zyx", degrees=False)[0]
+        dk = yaw_gt_k - _yaw_of_R(filter_state.si_Rs[k])
+        filter_state.si_Rs[k] = _apply_delta_yaw(filter_state.si_Rs[k], dk)
+
+
 def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
                        model, norm_mean, norm_std, window_len=100,
                        use_gt_meas=False,
                        meascov_scale=10.0, sigma_na=np.sqrt(1e-3),
                        sigma_ng=np.sqrt(1e-4), init_vel_sigma=1.0,
                        ita_ba=1e-4, ita_bg=1e-6,
-                       forced_state_id=None, meascov_override=None):
+                       forced_state_id=None, meascov_override=None,
+                       mahalanobis_fail_scale=10.0,
+                       gt_yaw_inject=False,
+                       use_gt_yaw_norm=False):
     """ImuTracker 파이프라인으로 EKF 궤적을 반환.
-    use_gt_meas=True 이면 네트워크 대신 GT 변위를 측정값으로 사용 (디버그용).
+    use_gt_meas=True     : 네트워크 대신 GT 변위를 측정값으로 사용 (디버그)
+    use_gt_yaw_norm=True : 측정 프레임 yaw 정규화에 GT quat 사용 (Method-E 진단)
     """
     from types import SimpleNamespace
     from utils.from_scipy import compute_euler_from_matrix
@@ -480,14 +523,18 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
         init_ba_sigma       = 0.02,
         g_norm              = 9.81,
         meascov_scale       = 1.0,   # 상태별 스케일은 TwoLayerMeasSource 내부에서 적용
-        mahalanobis_fail_scale = 0,
+        mahalanobis_fail_scale = mahalanobis_fail_scale,
     )
 
     device  = next(model.parameters()).device
-    tracker = TwoLayerImuTracker(model, norm_mean, norm_std, ekf_cfg,
-                                 update_freq=1.0, device=device,
-                                 forced_state_id=forced_state_id,
-                                 meascov_override=meascov_override)
+    tracker = TwoLayerImuTracker(
+        model, norm_mean, norm_std, ekf_cfg,
+        update_freq=1.0, device=device,
+        forced_state_id=forced_state_id,
+        meascov_override=meascov_override,
+        gt_quat=(quat  if use_gt_yaw_norm else None),
+        gt_ts_us=(ts_us if use_gt_yaw_norm else None),
+    )
 
     # GT 측정값 콜백 (디버그)
     if use_gt_meas:
@@ -495,8 +542,13 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
             idx_old = int(np.searchsorted(ts_us, t_oldest_us))
             idx_end = int(np.searchsorted(ts_us, t_end_us))
             dp_world = (pos_gt[idx_end] - pos_gt[idx_old]).reshape(3, 1)
-            R_old, _ = tracker.filter.get_past_state(t_oldest_us)
-            ri_z = compute_euler_from_matrix(R_old, "xyz", extrinsic=True)[0, 2]
+            if use_gt_yaw_norm:
+                # GT yaw 로 정규화 (Method-E)
+                idx_clamped = min(idx_old, len(quat) - 1)
+                ri_z = R.from_quat(quat[idx_clamped]).as_euler("zyx", degrees=False)[0]
+            else:
+                R_old, _ = tracker.filter.get_past_state(t_oldest_us)
+                ri_z = compute_euler_from_matrix(R_old, "xyz", extrinsic=True)[0, 2]
             Ri_z = np.array([
                 [np.cos(ri_z), -np.sin(ri_z), 0],
                 [np.sin(ri_z),  np.cos(ri_z), 0],
@@ -525,6 +577,9 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
             gyr[i].reshape(3, 1),
             acc_raw[i].reshape(3, 1),
         )
+        # ── GT yaw 주입 (방안 C): IMU 적분 yaw 오차를 GT 로 교정
+        if gt_yaw_inject:
+            _correct_yaw_to_gt(tracker.filter.state, ts_us, quat, i)
         _, _, p_ekf, _, _ = tracker.filter.get_evolving_state()
         ekf_positions.append(p_ekf.flatten().copy())
 
