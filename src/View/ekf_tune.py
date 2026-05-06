@@ -135,9 +135,11 @@ def plot_ekf_result(category: str, seq_name: str, split: str,
                     pos_gt: np.ndarray, net_pos: np.ndarray,
                     ekf_pos: np.ndarray, grid_log: list,
                     best_scale: float, rmse_net: float, rmse_ekf: float,
-                    output_dir: Path):
+                    output_dir: Path,
+                    ekf_pos_gtyaw: np.ndarray = None,
+                    rmse_gt_yaw: float = float("nan")):
     """
-    Left : X-Y 경로 비교 (GT / Network / Best EKF)
+    Left : X-Y 경로 비교 (GT / Network / Best EKF / GT-yaw EKF)
     Right: meascov_scale vs RMSE_XY 그리드 서치 곡선
     """
     fig, axes = plt.subplots(1, 2, figsize=(16, 6.5))
@@ -155,7 +157,11 @@ def plot_ekf_result(category: str, seq_name: str, split: str,
     ax.plot(net_xy[:,0], net_xy[:,1], lw=1.8, color="#d7191c", linestyle="--",
             label=f"ResMLP128 (RMSE {rmse_net:.3f} m)")
     ax.plot(ekf_xy[:,0], ekf_xy[:,1], lw=1.8, color="#1a9641", linestyle="-.",
-            label=f"Best EKF  (scale={best_scale:.4g}, RMSE {rmse_ekf:.3f} m)")
+            label=f"EKF best  (scale={best_scale:.4g}, RMSE {rmse_ekf:.3f} m)")
+    if ekf_pos_gtyaw is not None:
+        gtyaw_xy = ekf_pos_gtyaw[:, :2] - origin[:2]
+        ax.plot(gtyaw_xy[:,0], gtyaw_xy[:,1], lw=1.8, color="#ff7f00", linestyle=":",
+                label=f"EKF+GT-yaw (RMSE {rmse_gt_yaw:.3f} m)")
     ax.plot(0, 0, "k^", markersize=9,  zorder=6, label="Start")
     ax.plot(*gt_xy[-1], "b*", markersize=11, zorder=6, label="End (GT)")
 
@@ -178,6 +184,9 @@ def plot_ekf_result(category: str, seq_name: str, split: str,
                     lw=1.5, label=f"Best = {best_scale:.4g}")
         ax2.axhline(rmse_net, color="#2166ac", linestyle=":",
                     lw=1.5, label=f"Network RMSE = {rmse_net:.3f} m")
+        if not np.isnan(rmse_gt_yaw):
+            ax2.axhline(rmse_gt_yaw, color="#ff7f00", linestyle="-.",
+                        lw=1.5, label=f"EKF+GT-yaw = {rmse_gt_yaw:.3f} m")
         ax2.set_xlabel("meascov_scale (log)", fontsize=11)
         ax2.set_ylabel("RMSE_XY (m)", fontsize=11)
         ax2.set_title("Grid Search: meascov_scale vs RMSE_XY", fontsize=10)
@@ -186,7 +195,7 @@ def plot_ekf_result(category: str, seq_name: str, split: str,
         ax2.set_facecolor("#f2f2f2")
 
     fig.suptitle(
-        f"Oxford  [{category}]  ({split} set)  —  ResMLP128 + EKF (Method-B)",
+        f"Oxford  [{category}]  ({split} set)  —  Method-C: GT yaw 주입 검증",
         fontsize=12, fontweight="bold", y=1.01,
     )
     plt.tight_layout()
@@ -247,6 +256,7 @@ def main():
                     model, norm_mean, norm_std, WINDOW_LEN,
                     forced_state_id=state_id,
                     meascov_override=scale,
+                    mahalanobis_fail_scale=10.0,
                 )
                 rmse = compute_rmse_xy_anchor(ekf_pos, pos_gt, list(win_indices))
                 grid_log.append((scale, rmse))
@@ -263,41 +273,88 @@ def main():
         print(f"  >> best: meascov_scale={best_scale:.4g}  "
               f"RMSE_XY={best_rmse:.4f} m  (network={rmse_net:.4f} m)")
 
-        # 최적 스케일로 EKF 재실행 → 시각화
+        # 최적 스케일로 EKF 재실행 → 시각화 + 두 가지 진단
+        rmse_gt_yaw      = float("nan")
+        rmse_gt_meas     = float("nan")
+        rmse_gt_yaw_norm = float("nan")
         try:
             ekf_pos_best = run_ekf_imutracker(
                 ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
                 model, norm_mean, norm_std, WINDOW_LEN,
                 forced_state_id=state_id,
                 meascov_override=best_scale,
+                mahalanobis_fail_scale=10.0,
             )
+            # ── 방안 C: GT yaw 주입 실험
+            ekf_pos_gtyaw = run_ekf_imutracker(
+                ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
+                model, norm_mean, norm_std, WINDOW_LEN,
+                forced_state_id=state_id,
+                meascov_override=best_scale,
+                mahalanobis_fail_scale=10.0,
+                gt_yaw_inject=True,
+            )
+            rmse_gt_yaw = compute_rmse_xy_anchor(ekf_pos_gtyaw, pos_gt, list(win_indices))
+            print(f"  >> GT yaw 주입:    RMSE_XY={rmse_gt_yaw:.4f} m "
+                  f"(vs network={rmse_net:.4f} m, EKF={best_rmse:.4f} m)")
+
+            # ── 방안 D: GT 측정값 사용 (IMU 전파 품질 진단)
+            ekf_pos_gtmeas = run_ekf_imutracker(
+                ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
+                model, norm_mean, norm_std, WINDOW_LEN,
+                forced_state_id=state_id,
+                meascov_override=best_scale,
+                mahalanobis_fail_scale=10.0,
+                use_gt_meas=True,
+            )
+            rmse_gt_meas = compute_rmse_xy_anchor(ekf_pos_gtmeas, pos_gt, list(win_indices))
+            print(f"  >> GT 측정값 사용:     RMSE_XY={rmse_gt_meas:.4f} m "
+                  f"(vs network={rmse_net:.4f} m, EKF={best_rmse:.4f} m)")
+
+            # ── 방안 E: GT yaw 정규화 + 네트워크 측정 (측정 프레임 수정)
+            ekf_pos_gtyawnorm = run_ekf_imutracker(
+                ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
+                model, norm_mean, norm_std, WINDOW_LEN,
+                forced_state_id=state_id,
+                meascov_override=best_scale,
+                mahalanobis_fail_scale=10.0,
+                use_gt_yaw_norm=True,
+            )
+            rmse_gt_yaw_norm = compute_rmse_xy_anchor(ekf_pos_gtyawnorm, pos_gt, list(win_indices))
+            print(f"  >> GT yaw 정규화+네트워크: RMSE_XY={rmse_gt_yaw_norm:.4f} m "
+                  f"(vs network={rmse_net:.4f} m, EKF={best_rmse:.4f} m)")
+
             plot_ekf_result(
                 cat, seq_name, split,
                 pos_gt, net_pos, ekf_pos_best, grid_log,
                 best_scale, rmse_net, best_rmse, OUTPUT_DIR,
+                ekf_pos_gtyaw=ekf_pos_gtyaw, rmse_gt_yaw=rmse_gt_yaw,
             )
         except Exception as e:
             print(f"  [!] 시각화 실패: {e}")
 
-        results.append((cat, seq_name, split, best_scale, rmse_net, best_rmse, grid_log))
+        results.append((cat, seq_name, split, best_scale,
+                        rmse_net, best_rmse, rmse_gt_yaw, rmse_gt_meas, rmse_gt_yaw_norm, grid_log))
         print()
 
     # ── 결과 요약 테이블 ─────────────────────────────────────────────
-    print("\n" + "=" * 75)
+    print("\n" + "=" * 113)
     print(f"{'Category':<18} {'Split':<6} {'StateID':>7} {'Best Scale':>11} "
-          f"{'Net RMSE':>10} {'EKF RMSE':>10}  {'Improve':>8}")
-    print("-" * 75)
-    for cat, seq, split, scale, r_net, r_ekf, _ in results:
+          f"{'Net RMSE':>10} {'EKF RMSE':>10} {'GT-Meas':>9} {'GT-YawNorm':>11}  {'Improve':>8}")
+    print("-" * 113)
+    for cat, seq, split, scale, r_net, r_ekf, r_gtyaw, r_gtmeas, r_gtyawnorm, _ in results:
         sid  = CATEGORY_TO_STATE.get(cat, -1)
         diff = r_net - r_ekf          # positive = EKF better
         mark = " [+]" if diff > 0 else " [-]"
+        gtmeas_str    = f"{r_gtmeas:>9.4f}"    if not np.isnan(r_gtmeas)    else f"{'N/A':>9}"
+        gtyawnorm_str = f"{r_gtyawnorm:>11.4f}" if not np.isnan(r_gtyawnorm) else f"{'N/A':>11}"
         print(f"{cat:<18} {split:<6} {sid:>7} {scale:>11.4g} "
-              f"{r_net:>10.4f} {r_ekf:>10.4f}  {diff:>+7.4f}{mark}")
-    print("=" * 75)
+              f"{r_net:>10.4f} {r_ekf:>10.4f} {gtmeas_str} {gtyawnorm_str}  {diff:>+7.4f}{mark}")
+    print("=" * 113)
 
     # ── 업데이트된 STATE_EKF_PARAMS 코드 ────────────────────────────
     state_to_cat = {v: k for k, v in CATEGORY_TO_STATE.items()}
-    cat_to_scale = {cat: scale for cat, _, _, scale, _, _, _ in results}
+    cat_to_scale = {cat: scale for cat, _, _, scale, _, _, _, _, _, _ in results}
 
     labels = {
         -1: "unknown",      1: "handbag",   2: "handheld",
