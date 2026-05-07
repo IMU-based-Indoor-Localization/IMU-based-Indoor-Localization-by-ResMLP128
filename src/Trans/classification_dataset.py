@@ -217,10 +217,19 @@ def compute_class_weights_from_counts(counts: Dict[str, int]) -> torch.Tensor:
     """
     클래스별 윈도우 수로부터 역제곱근 가중치를 계산.
     CLASS_NAMES 순서(0-6)로 정렬된 Tensor 반환.
+
+    주의: 샘플이 0개인 클래스(noise 등)는 weight=0 으로 처리하여 loss 에서 배제.
+    (샘플이 없는 클래스에 큰 weight 를 주면 label_smoothing 과 결합 시 collapse 발생)
     """
     counts_arr = np.array(
         [counts.get(name, 0) for name in CLASS_NAMES], dtype=np.float32
     )
-    weights = 1.0 / np.sqrt(np.maximum(counts_arr, 1))
-    weights = weights / weights.sum() * len(CLASS_NAMES)
+    # 샘플이 0인 클래스는 weight=0 (학습에서 제외), 나머지만 역제곱근 가중치
+    has_samples = counts_arr > 0
+    weights = np.zeros_like(counts_arr)
+    weights[has_samples] = 1.0 / np.sqrt(counts_arr[has_samples])
+    # 유효 클래스 수 기준으로 정규화
+    n_valid = has_samples.sum()
+    if weights.sum() > 0:
+        weights = weights / weights.sum() * n_valid
     return torch.from_numpy(weights.astype(np.float32))

@@ -68,7 +68,10 @@ DEFAULT_CONFIG = {
         },
     },
     "loss": {
-        "label_smoothing": 0.05,
+        # label_smoothing과 극단적 class weight(noise=6.79)를 동시 사용하면
+        # 모든 샘플에 noise logit 강화 gradient가 발생 → collapse.
+        # noise 샘플이 0개이므로 label_smoothing=0으로 설정.
+        "label_smoothing": 0.0,
         "use_class_weights": True,
     },
     "optimizer": {
