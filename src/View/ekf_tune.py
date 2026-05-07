@@ -49,10 +49,15 @@ from visualize_comparison import (
     run_ekf_imutracker,
     STATE_EKF_PARAMS,
 )
+# ResMLPClassifier: 별도 분류기 (out_cls_oxford) — soft switching 에서 사용
+try:
+    from train_classifier import ResMLPClassifier
+except ImportError:
+    ResMLPClassifier = None
 
 # ── 설정 ──────────────────────────────────────────────────────────────
-MODEL_DIR     = _SRC / "Network" / "out_regression"    # no-classifier 회귀 모델
-CLS_MODEL_DIR = _SRC / "outputs" / "out_classifier2"   # classifier + 회귀 통합 모델
+MODEL_DIR     = _SRC / "Network" / "out_regression"    # 회귀 전용 모델 (use_classifier=False)
+CLS_MODEL_DIR = _SRC / "Network" / "out_cls_oxford"    # 별도 분류기 모델 (ResMLPClassifier)
 OXFORD_SPLIT  = _SRC / "Network" / "oxford_split"
 OUTPUT_DIR    = _ROOT / "doc" / "ekf_compare"
 WINDOW_LEN    = 100
@@ -97,11 +102,13 @@ def load_regression_model(model_dir: Path, device: torch.device):
 
 
 def load_classifier_model(model_dir: Path, device: torch.device):
-    """out_classifier2 (use_classifier=True, PoseCondMean) 모델 로드."""
+    """out_cls_oxford (ResMLPClassifier, 별도 분류기) 모델 로드."""
+    if ResMLPClassifier is None:
+        raise ImportError("train_classifier.py 를 찾을 수 없습니다 (ResMLPClassifier 미정의)")
     with open(model_dir / "config.json") as f:
         cfg = json.load(f)
     model_cfg = cfg["model"]
-    model = TwoLayerModel(model_cfg).to(device)
+    model = ResMLPClassifier(model_cfg).to(device)
     ck = torch.load(model_dir / "checkpoints" / "best.pth",
                     map_location=device, weights_only=False)
     model.load_state_dict(ck["model"])
@@ -239,7 +246,7 @@ def main():
         except Exception as e:
             print(f"  [WARN] 로드 실패: {e} → soft-switching 생략\n")
     else:
-        print(f"  [WARN] {CLS_MODEL_DIR} 없음 → soft-switching 생략\n")
+        print(f"  [WARN] {CLS_MODEL_DIR} 없음 → soft-switching 생략 (학습 후 재실행 필요)\n")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -360,15 +367,18 @@ def main():
         except Exception as e:
             print(f"  [!] 시각화 실패: {e}")
 
-        # ── Soft Switching EKF (out_classifier2 + Context-Aware) ─────────
+        # ── Soft Switching EKF (out_regression + out_cls_oxford 별도 분류기) ──
         rmse_soft = float("nan")
         if cls_model is not None:
             try:
                 ekf_pos_soft = run_ekf_imutracker(
                     ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
-                    cls_model, cls_mean, cls_std, WINDOW_LEN,
+                    model, norm_mean, norm_std, WINDOW_LEN,   # 회귀 모델 (변위 추론)
                     mahalanobis_fail_scale=10.0,
-                    use_soft_switching=True,   # Context-Aware Soft Switching
+                    use_soft_switching=True,                   # Context-Aware Soft Switching
+                    cls_model=cls_model,                       # 별도 분류기 (meascov_scale 결정)
+                    cls_norm_mean=cls_mean,
+                    cls_norm_std=cls_std,
                 )
                 rmse_soft = compute_rmse_xy_anchor(ekf_pos_soft, pos_gt, list(win_indices))
                 print(f"  >> Soft-Switch EKF:    RMSE_XY={rmse_soft:.4f} m "

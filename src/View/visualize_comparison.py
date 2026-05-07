@@ -27,6 +27,11 @@ from scipy.spatial.transform import Rotation as R
 
 from dataset import TLIONpySingleDataset
 from model_twolayer import TwoLayerModel
+# ResMLPClassifier: 별도 분류기 (train_classifier.py) — soft switching 에서 선택적으로 사용
+try:
+    from train_classifier import ResMLPClassifier
+except ImportError:
+    ResMLPClassifier = None   # 미사용 시 graceful fallback
 from tracker.scekf import ImuMSCKF
 from tracker.imu_buffer import ImuBuffer
 from utils.from_scipy import compute_euler_from_matrix
@@ -234,7 +239,10 @@ class TwoLayerMeasSource:
                  norm_std: np.ndarray, device: torch.device,
                  forced_state_id: int = None,
                  meascov_override: float = None,
-                 use_soft_switching: bool = True):
+                 use_soft_switching: bool = True,
+                 cls_model=None,
+                 cls_norm_mean: np.ndarray = None,
+                 cls_norm_std: np.ndarray = None):
         self.model              = model
         self.norm_mean          = norm_mean.astype(np.float32)  # [6]
         self.norm_std           = norm_std.astype(np.float32)   # [6]
@@ -246,6 +254,11 @@ class TwoLayerMeasSource:
         # Context-Aware Soft Switching: True → softmax 확률 가중 보간,
         #                               False → argmax hard switching
         self.use_soft_switching = use_soft_switching
+        # 별도 분류기 모델 (out_cls_oxford 등 ResMLPClassifier 계열)
+        # None 이면 회귀 모델의 class_logits (TwoLayerModel.use_classifier=True 시) 사용
+        self.cls_model      = cls_model
+        self.cls_norm_mean  = cls_norm_mean.astype(np.float32) if cls_norm_mean is not None else None
+        self.cls_norm_std   = cls_norm_std.astype(np.float32)  if cls_norm_std  is not None else None
 
     @torch.no_grad()
     def get_displacement_measurement(self, net_gyr_w: np.ndarray,
@@ -260,12 +273,20 @@ class TwoLayerMeasSource:
         acc_lin_w = net_acc_w.copy()
         acc_lin_w[:, 2] -= G_NORM
 
-        # [acc | gyr] 순서 (dataset.py 와 동일)
-        features = np.concatenate([acc_lin_w, net_gyr_w], axis=1).astype(np.float32)  # [N,6]
-        features = (features - self.norm_mean) / self.norm_std
+        # [acc | gyr] 순서 (dataset.py 와 동일) — 정규화 전 raw 피처 보존
+        raw_features = np.concatenate([acc_lin_w, net_gyr_w], axis=1).astype(np.float32)  # [N,6]
 
+        # 회귀 모델용 정규화 → 변위 추론
+        features = (raw_features - self.norm_mean) / self.norm_std
         x = torch.from_numpy(features.T).unsqueeze(0).to(self.device)  # [1,6,N]
         y_hat, log_var, class_logits = self.model(x)
+
+        # 별도 분류기 모델이 있으면 그 출력으로 class_logits 를 덮어씀
+        # (회귀 모델이 use_classifier=False 여서 None 을 반환할 때 특히 유용)
+        if self.cls_model is not None:
+            cls_feat = (raw_features - self.cls_norm_mean) / self.cls_norm_std
+            x_cls = torch.from_numpy(cls_feat.T).unsqueeze(0).to(self.device)
+            class_logits = self.cls_model(x_cls)   # [1, num_classes]
 
         meas = y_hat[0].cpu().numpy().reshape(3, 1)
         lv   = np.clip(log_var[0].cpu().numpy(), -4.0, 4.0)
@@ -325,7 +346,10 @@ class TwoLayerImuTracker:
                  meascov_override: float = None,
                  gt_quat: np.ndarray = None,
                  gt_ts_us: np.ndarray = None,
-                 use_soft_switching: bool = True):
+                 use_soft_switching: bool = True,
+                 cls_model=None,
+                 cls_norm_mean: np.ndarray = None,
+                 cls_norm_std: np.ndarray = None):
         if device is None:
             device = next(model.parameters()).device
 
@@ -356,7 +380,10 @@ class TwoLayerImuTracker:
         self.meas_source = TwoLayerMeasSource(model, norm_mean, norm_std, device,
                                               forced_state_id=forced_state_id,
                                               meascov_override=meascov_override,
-                                              use_soft_switching=use_soft_switching)
+                                              use_soft_switching=use_soft_switching,
+                                              cls_model=cls_model,
+                                              cls_norm_mean=cls_norm_mean,
+                                              cls_norm_std=cls_norm_std)
         self.imu_buffer  = ImuBuffer()
 
         self.callback_first_update    = None
@@ -530,7 +557,10 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
                        mahalanobis_fail_scale=10.0,
                        gt_yaw_inject=False,
                        use_gt_yaw_norm=False,
-                       use_soft_switching: bool = True):
+                       use_soft_switching: bool = True,
+                       cls_model=None,
+                       cls_norm_mean: np.ndarray = None,
+                       cls_norm_std: np.ndarray = None):
     """ImuTracker 파이프라인으로 EKF 궤적을 반환.
     use_gt_meas=True     : 네트워크 대신 GT 변위를 측정값으로 사용 (디버그)
     use_gt_yaw_norm=True : 측정 프레임 yaw 정규화에 GT quat 사용 (Method-E 진단)
@@ -563,6 +593,9 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
         gt_quat=(quat  if use_gt_yaw_norm else None),
         gt_ts_us=(ts_us if use_gt_yaw_norm else None),
         use_soft_switching=use_soft_switching,
+        cls_model=cls_model,
+        cls_norm_mean=cls_norm_mean,
+        cls_norm_std=cls_norm_std,
     )
 
     # GT 측정값 콜백 (디버그)

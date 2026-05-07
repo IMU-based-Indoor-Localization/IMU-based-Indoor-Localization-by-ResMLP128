@@ -26,20 +26,23 @@ from model_twolayer import PoseClassifier, ResMLPExtractor
 
 
 DEFAULT_CONFIG = {
-    "train_dir": "cls_split_7way/train",
-    "val_dir": "cls_split_7way/val",
-    "test_dir": "cls_split_7way/test",
-    "window_len": 200,      # 100Hz 기준 2초
-    "train_stride": 100,    # 1초 중첩
-    "eval_stride": 100,
+    # --- 데이터셋 설정 (회귀 모델과 동일: oxford_split, window_len=100, stride=10) ---
+    "train_dir": "oxford_split/train",
+    "val_dir": "oxford_split/val",
+    "test_dir": "oxford_split/test",
+    "window_len": 100,      # 100Hz × 1s (회귀 모델과 동일, EKF 호환)
+    "train_stride": 10,     # 회귀 모델과 동일
+    "eval_stride": 10,
     "batch_size": 128,
     "num_workers": 4,
-    "epochs": 80,
+    "epochs": 100,          # 회귀 모델과 동일
     "warmup_epochs": 5,
     "grad_clip": 1.0,
     "log_interval": 50,
-    "early_stopping": 15,
-    "output_dir": "out_classifier_7way",
+    "early_stopping": 20,
+    "output_dir": "out_cls_oxford",
+    # 증강: 회귀 모델의 TLIONpySingleDataset is_train=True 시 bias_noise+gravity_perturb+yaw가
+    # 이미 적용됨. 여기서는 추가 noise/scale 증강만 설정.
     "augment": {
         "noise": True,
         "noise_std": 0.01,
@@ -47,10 +50,10 @@ DEFAULT_CONFIG = {
         "scale_range": [0.95, 1.05],
     },
     "model": {
-        "input_len": 200,
+        "input_len": 100,       # window_len과 일치 (회귀 모델과 동일)
         "input_channel": 6,
-        "patch_len": 20,
-        "feature_dim": 128,
+        "patch_len": 10,        # 패치 수 10개 유지 (100/10, 회귀 모델과 동일)
+        "feature_dim": 128,     # 회귀 모델과 동일
         "active_func": "GELU",
         "extractor": {
             "layer_num": 6,
@@ -75,7 +78,7 @@ DEFAULT_CONFIG = {
     },
     "scheduler": {
         "name": "CosineAnnealingLR",
-        "T_max": 80,
+        "T_max": 100,
         "eta_min": 1e-6,
     },
 }
@@ -285,7 +288,7 @@ def train(cfg: Dict):
     logger = setup_logger(out_dir / "train_classifier.log")
 
     logger.info("=" * 60)
-    logger.info("7-way baseline classifier training")
+    logger.info("7-way classifier training (oxford_split, window_len=100, stride=10)")
     logger.info(f"출력: {out_dir}")
 
     with open(out_dir / "config.json", "w", encoding="utf-8") as f:
