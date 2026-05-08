@@ -1,0 +1,36 @@
+{
+  "model_variant":     "small",
+  "resnet_base_plane": 19,
+  "resnet_fc_dim":     166,
+
+  "train_dir": "oxford_split/train",
+  "val_dir":   "oxford_split/val",
+  "test_dir":  "oxford_split/test",
+  "fmt":        "oxford",
+  "with_label": false,
+
+  "window_len":   100,
+  "train_stride": 10,
+  "eval_stride":  10,
+  "batch_size":   128,
+  "num_workers":  4,
+
+  "tlio_aug_dir":    "C:\\Users\\hs091\\Desktop\\TLIO-master\\golden-new-format-cc-by-nc-with-imus",
+  "tlio_aug_stride": 10,
+
+  "loss": {
+    "cls_weight":      0.0,
+    "dir_weight":      0.0,
+    "label_smoothing": 0.0,
+    "mse_epochs":      30
+  },
+
+  "optimizer": {"name": "AdamW", "lr": 1e-4, "weight_decay": 1e-4},
+  "scheduler": {"name": "CosineAnnealingLR", "T_max": 100, "eta_min": 1e-6},
+  "warmup_epochs": 5,
+  "epochs":     100,
+  "grad_clip":  1.0,
+  "log_interval": 50,
+  "save_every":   10,
+  "output_dir": "out_resnet_small"
+}
