@@ -413,53 +413,45 @@ void ScEkf::apply_zupt(double sigma_zupt) {
     Sigma_ = 0.5 * (Sigma_ + Sigma_.transpose());
 }
 
-void ScEkf::apply_correction(const VecX& delta_X) {
-    int N = state_.N();
-    // 과거 상태 보정
-    for (int i = 0; i < N; ++i) {
-        Vec3 dtheta = delta_X.segment<3>(6*i);
-        Vec3 dp     = delta_X.segment<3>(6*i + 3);
-        state_.si_Rs[i] = mat_exp(dtheta) * state_.si_Rs[i];
-        state_.si_ps[i] = state_.si_ps[i] + dp;
-    }
+void ScEkf::apply_yaw_update(double yaw_meas, double sigma_yaw) {
+    if (!initialized_) return;
 
-    // 현재 상태 보정
-    int base = 6 * N;
-    Vec3 dtheta = delta_X.segment<3>(base);
-    Vec3 dv     = delta_X.segment<3>(base + 3);
-    Vec3 dp_ev  = delta_X.segment<3>(base + 6);
-    Vec3 dbg    = delta_X.segment<3>(base + 9);
-    Vec3 dba    = delta_X.segment<3>(base + 12);
+    int N          = state_.N();
+    int sz         = 15 + 6 * N;
+    int theta_base = 6 * N;   // 현재 오차 상태에서 dθ 시작 인덱스
 
-    state_.R  = mat_exp(dtheta) * state_.R;
-    state_.v  = state_.v + dv;
-    state_.p  = state_.p + dp_ev;
-    state_.bg = state_.bg + dbg;
-    state_.ba = state_.ba + dba;
-}
+    // ① 현재 yaw 추출: ψ = atan2(R[1,0], R[0,0])
+    double psi_cur = std::atan2(state_.R(1, 0), state_.R(0, 0));
 
-void ScEkf::marginalize(int cut_idx) {
-    int rm = cut_idx + 1;  // 제거할 과거 상태 수
+    // ② 이노베이션 계산 ([-π, π] 래핑)
+    double innov = yaw_meas - psi_cur;
+    while (innov >  M_PI) innov -= 2.0 * M_PI;
+    while (innov < -M_PI) innov += 2.0 * M_PI;
 
-    state_.si_Rs.erase(state_.si_Rs.begin(), state_.si_Rs.begin() + rm);
-    state_.si_ps.erase(state_.si_ps.begin(), state_.si_ps.begin() + rm);
-    state_.si_timestamps_us.erase(
-        state_.si_timestamps_us.begin(),
-        state_.si_timestamps_us.begin() + rm);
+    // ③ 이노베이션 게이트: 45° 초과 시 자기 간섭 가능성 → 건너뜀
+    if (std::abs(innov) > 45.0 / 180.0 * M_PI) return;
 
-    // 공분산 블록 잘라내기
-    int cut_dim = 6 * rm;
-    int new_sz  = static_cast<int>(Sigma_.rows()) - cut_dim;
-    Sigma_  = Sigma_.block(cut_dim, cut_dim, new_sz, new_sz).eval();
-}
+    // ④ 분모 (gimbal lock 체크)
+    //    denom = R[0,0]² + R[1,0]²  (cos²(pitch) · (...)  — pitch ≈ 90° 시 특이점)
+    double denom = state_.R(0, 0) * state_.R(0, 0)
+                 + state_.R(1, 0) * state_.R(1, 0);
+    if (denom < 1e-8) return;
 
-Vec3 ScEkf::position_std() const {
-    int sz = static_cast<int>(Sigma_.rows());
-    Vec3 std_vec;
-    std_vec(0) = std::sqrt(Sigma_(sz-9, sz-9));
-    std_vec(1) = std::sqrt(Sigma_(sz-8, sz-8));
-    std_vec(2) = std::sqrt(Sigma_(sz-7, sz-7));
-    return std_vec;
-}
+    // ⑤ 야코비안 H (1 × sz)
+    //    ∂ψ/∂dθ: 왼쪽 SO(3) 교란 dθ 에 대한 yaw 편미분
+    //      ∂ψ/∂dθ[0] = -R[0,0]·R[2,0] / denom
+    //      ∂ψ/∂dθ[1] = -R[1,0]·R[2,0] / denom
+    //      ∂ψ/∂dθ[2] = 1.0
+    Eigen::RowVectorXd H = Eigen::RowVectorXd::Zero(sz);
+    H(theta_base    ) = -state_.R(0, 0) * state_.R(2, 0) / denom;
+    H(theta_base + 1) = -state_.R(1, 0) * state_.R(2, 0) / denom;
+    H(theta_base + 2) =  1.0;
 
-} // namespace imu_ekf
+    // ⑥ 측정 노이즈 (scalar)
+    double R_yaw = sigma_yaw * sigma_yaw;
+
+    // ⑦ 이노베이션 공분산 S (scalar)
+    double S_val = (H * Sigma_ * H.transpose())(0, 0) + R_yaw;
+    if (S_val < 1e-12) return;
+
+   

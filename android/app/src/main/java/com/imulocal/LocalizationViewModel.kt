@@ -123,6 +123,14 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
          * 5 cm/s: MEMS 정지 드리프트(≈1-3 cm/s) 의 약 2-3배 → 안전 여유.
          */
         private const val MODEL_VELOCITY_GATE = 0.05  // m/s
+
+        // ── Yaw drift 보정 파라미터 ──────────────────────────────────
+        /**
+         * TYPE_ROTATION_VECTOR yaw 측정 노이즈 표준편차 (rad).
+         * 실내 자기 간섭 환경을 고려하여 10° (0.1745 rad) 로 보수적으로 설정.
+         * 지자기 노이즈가 적은 환경이면 5° 로 줄여도 무방.
+         */
+        private const val YAW_SIGMA_RAD = 10.0 / 180.0 * Math.PI
     }
 
     // ── 의존 컴포넌트 ────────────────────────────────────────────
@@ -178,6 +186,16 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     private val RETURN_PROXIMITY_M = 0.5
     /** 출발 후 AWAY_THRESHOLD_M 이상 멀어진 적이 있는지 여부. */
     private var wasAwayFromOrigin  = false
+
+    // ── Yaw drift 보정 ────────────────────────────────────────────
+    /**
+     * EKF 초기화 시점의 TYPE_ROTATION_VECTOR yaw (rad).
+     * Double.NaN = 미초기화 또는 rotVecSensor 없음.
+     *
+     * 보정 공식:  yaw_meas = yaw_rv_current − yaw_rv_at_init
+     *   → EKF 월드 프레임 기준 상대 yaw (초기화 시점 기준 0)
+     */
+    private var yawRvAtInit = Double.NaN
 
     /**
      * inferJob → propJob 단방향 신호:
@@ -245,6 +263,12 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
                         if (!EkfBridge.isInitialized()) {
                             EkfBridge.initialize(tsUs, acc)
+                            // EKF 초기화 직후 Rotation Vector yaw 오프셋 기록
+                            val rvYaw = imuCollector.getLatestYawRad()
+                            if (!rvYaw.isNaN()) {
+                                yawRvAtInit = rvYaw.toDouble()
+                                Log.i(TAG, "Yaw 오프셋 초기화: ${"%.1f".format(Math.toDegrees(yawRvAtInit))}°")
+                            }
                             continue
                         }
 
@@ -316,6 +340,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         prevEkfVelNorm       = 0.0
         // 원점 복귀 감지 초기화
         wasAwayFromOrigin    = false
+        // Yaw drift 보정 초기화
+        yawRvAtInit          = Double.NaN
         _state.value = LocalizationState()
     }
 
@@ -417,6 +443,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         if (currentlyStatic) {
             Log.d(TAG, "정적 상태 확정 (gyrRms=${"%.4f".format(gyrRms)} rad/s) — ZUPT 적용")
             EkfBridge.applyZupt()
+            // 정지 상태에서도 yaw 보정 주입 (속도 0 확정 + yaw 동시 보정)
+            applyRotVecYaw("STATIC")
             return
         }
 
@@ -500,7 +528,10 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             repeat(rm) { if (localCloneHistory.isNotEmpty()) localCloneHistory.removeFirst() }
         }
 
-        // ⑭ 위치/속도 조회 → UI 갱신
+        // ⑭ Yaw drift 보정 (이동 중): EKF update 직후 주입
+        applyRotVecYaw("MOVING")
+
+        // ⑮ 위치/속도 조회 → UI 갱신
         val pos = EkfBridge.getPosition()  // [px, py, pz, sx, sy, sz]
         val vel = EkfBridge.getVelocity()  // [vx, vy, vz]
 
@@ -512,39 +543,4 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
         _state.value = _state.value.copy(
             position          = Triple(pos[0], pos[1], pos[2]),
-            posStd            = Triple(pos[3], pos[4], pos[5]),
-            velocity          = Triple(vel[0], vel[1], vel[2]),
-            carryMode         = result.className,
-            carryProb         = result.clsProb.maxOrNull() ?: 0f,
-            trackPoints       = trackPoints.toList(),
-            modelTrackPoints  = modelTrackPoints.toList(),
-            inferLatency      = inferLatency
-        )
-    }
-
-    // ── 헬퍼: 시작 클론 탐색 ─────────────────────────────────────
-    /**
-     * localCloneHistory 에서 (tEndUs - WINDOW_DURATION_US) 에 가장 가까운 항목 반환.
-     * 허용 오차 CLONE_MATCH_TOL_US 초과 시 -1L 반환.
-     * inferJob 전용 history 를 직접 참조하므로 락 불필요.
-     */
-    private fun findBeginClone(tEndUs: Long, history: ArrayDeque<Long>): Long {
-        if (history.isEmpty()) return -1L
-        val target   = tEndUs - WINDOW_DURATION_US
-        var best     = history[0]
-        var bestDiff = abs(best - target)
-        for (ts in history) {
-            val diff = abs(ts - target)
-            if (diff < bestDiff) { bestDiff = diff; best = ts }
-        }
-        return if (bestDiff <= CLONE_MATCH_TOL_US) best else -1L
-    }
-
-    // ── 헬퍼: 변위 공분산 행렬 구성 ────────────────────────────
-    /**
-     * 네트워크 출력 log-variance → variance 변환 후 3×3 대각 행렬(row-major).
-     *
-     * Python 원본(meas_source_torchscript.py):
-     *   meas_cov[meas_cov < -4] = -4   ← exp(-4) ≈ 0.018 m² 가 최소 분산
-     *
-     * 이전 코드는 variance를 1e-6 까지 허용해 과도한 신뢰 가능성이 있�
+            posStd            = Tripl

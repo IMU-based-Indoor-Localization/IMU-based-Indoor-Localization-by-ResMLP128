@@ -162,18 +162,24 @@ object EkfBridge {
         nativeApplyZupt(sigmaZupt)
     }
 
+    /**
+     * Yaw 업데이트: Android TYPE_ROTATION_VECTOR 의 절대 yaw 를 EKF 에 주입.
+     *
+     * yaw_meas 는 EKF 월드 프레임 기준으로 계산해야 함:
+     *   yaw_meas = atan2(R_rv[1,0], R_rv[0,0])  (측정)
+     *            - atan2(R_rv_init[1,0], R_rv_init[0,0])  (초기화 시점 오프셋)
+     *
+     * 이노베이션 |δψ| > 45° 이면 자기 간섭으로 판단하여 C++ 내부에서 자동 스킵.
+     *
+     * @param yawMeas   EKF 프레임 yaw 측정값 (rad)
+     * @param sigmaYaw  측정 노이즈 표준편차 (rad, 기본 10° = 0.1745 rad)
+     */
+    fun applyYawUpdate(yawMeas: Double,
+                       sigmaYaw: Double = 10.0 / 180.0 * Math.PI) {
+        nativeApplyYawUpdate(yawMeas, sigmaYaw)
+    }
+
     // ── Native 선언 ────────────────────────────────────────────
     @JvmStatic external fun nativeCreate(params: DoubleArray)
     @JvmStatic external fun nativeInitialize(tUs: Long, acc: DoubleArray)
-    @JvmStatic external fun nativePropagate(acc: DoubleArray, gyr: DoubleArray, tUs: Long, tAugmentUs: Long)
-    @JvmStatic external fun nativeUpdate(meas: DoubleArray, cov: DoubleArray, tBeginUs: Long, tEndUs: Long)
-    @JvmStatic external fun nativeGetPosition(): DoubleArray
-    @JvmStatic external fun nativeGetVelocity(): DoubleArray
-    @JvmStatic external fun nativeSetMeasCovScale(scale: Double)
-    @JvmStatic external fun nativeSetProcessNoise(sigmaNA: Double, sigmaNG: Double)
-    @JvmStatic external fun nativeMarginalize(cutIdx: Int)
-    @JvmStatic external fun nativeIsInitialized(): Boolean
-    @JvmStatic external fun nativeGetCloneRotation(tUs: Long): DoubleArray
-    @JvmStatic external fun nativeGetGyrBias(): DoubleArray
-    @JvmStatic external fun nativeApplyZupt(sigma: Double)
-}
+    @JvmStatic external fun nativePropagat
