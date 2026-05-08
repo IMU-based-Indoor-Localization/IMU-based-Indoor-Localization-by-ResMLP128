@@ -253,6 +253,21 @@ public:
      */
     void apply_zupt(double sigma_zupt = 0.05);
 
+    /**
+     * Yaw 절대값 업데이트: Android TYPE_ROTATION_VECTOR 의 yaw 를 EKF 에 주입.
+     *
+     * 관측 모델: ψ_measured = ψ_current + δψ
+     *   H_yaw = ∂ψ/∂dθ (1×sz):  오차 상태 dθ 중 z 성분이 yaw 에 해당.
+     *
+     * 이노베이션 게이트: |δψ| > 45° 시 자기 간섭(Magnetic disturbance) 으로 판단 → 건너뜀.
+     *
+     * @param yaw_meas   EKF 월드 프레임 기준 측정 yaw (rad).
+     *                   = atan2(R_rv[1,0], R_rv[0,0]) - yaw_rv_at_init
+     * @param sigma_yaw  측정 노이즈 표준편차 (rad, 기본 10° ≈ 0.1745)
+     */
+    void apply_yaw_update(double yaw_meas,
+                          double sigma_yaw = 10.0 / 180.0 * M_PI);
+
     // ── 상태 조회 ───────────────────────────────────────────
     bool        is_initialized()  const { return initialized_; }
     const FilterState& state()    const { return state_; }
@@ -262,28 +277,4 @@ public:
     Vec3 position() const { return state_.p; }
     /** 현재 속도 (월드 프레임) */
     Vec3 velocity() const { return state_.v; }
-    /** 위치 표준편차 [σx, σy, σz] */
-    Vec3 position_std() const;
-
-private:
-    FilterConfig cfg_;
-    FilterState  state_;
-    MatXX        Sigma_;    ///< 전체 공분산 (15+6N × 15+6N)
-    Eigen::Matrix<double,6,6> W_;  ///< IMU 노이즈 공분산
-    MatXX        Q_;               ///< 프로세스 노이즈 (편향 랜덤워크)
-
-    bool   initialized_{false};
-    bool   first_update_{true};
-
-    void reset_covariance();
-    void build_noise_matrices();
-    void apply_correction(const VecX& delta_X);
-
-    /** 전체 공분산에서 15차원 오차 공분산 블록을 반환 */
-    Mat15 Sigma15() const {
-        int sz = static_cast<int>(Sigma_.rows());
-        return Sigma_.block<15,15>(sz-15, sz-15);
-    }
-};
-
-} // namespace imu_ekf
+    /** 위치 표준편차 [σx, σy,

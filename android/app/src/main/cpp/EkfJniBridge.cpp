@@ -343,4 +343,4 @@ Java_com_imulocal_EkfBridge_nativeApplyZupt(
         g_ekf->apply_zupt(static_cast<double>(sigma_zupt));
 }
 
-} // extern "C"
+// ────�

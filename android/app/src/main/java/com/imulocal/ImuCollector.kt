@@ -63,6 +63,11 @@ class ImuCollector(context: Context) : SensorEventListener {
     private val gyroSensor    = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
     /** 중력 제거 가속도 — 네트워크 입력용. 기기에 없으면 null (대부분 기기에 존재) */
     private val linAccSensor  = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+    /**
+     * 절대 방위 융합 센서 (가속도+자이로+지자기 융합).
+     * Yaw drift 보정에 사용. 기기에 없으면 null (대부분의 안드로이드 기기에 존재).
+     */
+    private val rotVecSensor  = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
     // ── 최신 센서값 캐시 ─────────────────────────────────────────
     @Volatile private var latestAcc    = FloatArray(3)
@@ -70,6 +75,14 @@ class ImuCollector(context: Context) : SensorEventListener {
     @Volatile private var latestLinAcc = FloatArray(3)   // 없으면 zero 유지
     @Volatile private var latestAccTs  = -1L
     @Volatile private var latestGyrTs  = -1L
+
+    /**
+     * TYPE_ROTATION_VECTOR 에서 추출한 최신 yaw.
+     *
+     * 계산: SensorManager.getRotationMatrixFromVector() → 3×3 행렬 → yaw = atan2(R[1,0], R[0,0])
+     * 초기값 Float.NaN — rotVecSensor 가 없거나 아직 수신 전이면 NaN 유지.
+     */
+    @Volatile private var latestYawRad: Float = Float.NaN
 
     // ── EKF 전파용 큐 (소비 후 비워짐) ──────────────────────────
     private val propagateQueue = ConcurrentLinkedQueue<ImuSample>()
@@ -94,6 +107,7 @@ class ImuCollector(context: Context) : SensorEventListener {
         latestAccTs   = -1L
         latestGyrTs   = -1L
         latestLinAcc  = FloatArray(3)
+        latestYawRad  = Float.NaN
         propagateQueue.clear()
         ringBuffer.clear()
         _latestSample = null
@@ -105,6 +119,13 @@ class ImuCollector(context: Context) : SensorEventListener {
             Log.i(TAG, "TYPE_LINEAR_ACCELERATION 등록 완료")
         } else {
             Log.w(TAG, "TYPE_LINEAR_ACCELERATION 없음 — linAcc=0 으로 대체 (네트워크 정확도 저하)")
+        }
+        if (rotVecSensor != null) {
+            // UI 주파수(20Hz)면 충분 — SENSOR_DELAY_GAME ≈ 50Hz
+            sensorManager.registerListener(this, rotVecSensor, SensorManager.SENSOR_DELAY_GAME)
+            Log.i(TAG, "TYPE_ROTATION_VECTOR 등록 완료 — Yaw drift 보정 활성화")
+        } else {
+            Log.w(TAG, "TYPE_ROTATION_VECTOR 없음 — Yaw drift 보정 비활성화")
         }
         Log.i(TAG, "IMU 수집 시작")
     }
@@ -127,6 +148,14 @@ class ImuCollector(context: Context) : SensorEventListener {
             Sensor.TYPE_LINEAR_ACCELERATION -> { latestLinAcc = event.values.clone() }
             // linAcc 는 별도 타임스탬프 동기 불요: TYPE_ACCELEROMETER 와 동일 타임베이스에서
             // 파생되므로 최신값 사용으로 충분
+            Sensor.TYPE_ROTATION_VECTOR -> {
+                // 3×3 회전 행렬(row-major, device→world) 로 변환
+                val rotMat = FloatArray(9)
+                android.hardware.SensorManager.getRotationMatrixFromVector(rotMat, event.values)
+                // yaw = atan2(R[1,0], R[0,0])  (EKF 와 동일한 ZYX Euler yaw 공식)
+                //   rotMat[row*3+col] → R[1,0]=rotMat[3], R[0,0]=rotMat[0]
+                latestYawRad = Math.atan2(rotMat[3].toDouble(), rotMat[0].toDouble()).toFloat()
+            }
         }
 
         // 가속도 + 자이로 모두 수신된 이후에만 샘플링
@@ -170,37 +199,4 @@ class ImuCollector(context: Context) : SensorEventListener {
         var s = propagateQueue.poll()
         while (s != null) {
             result.add(s)
-            s = propagateQueue.poll()
-        }
-        return result
-    }
-
-    // ── 추론용 ───────────────────────────────────────────────────
-    /**
-     * 최근 WINDOW_SIZE 샘플을 channel-major FloatArray(600) 로 반환.
-     *
-     * 채널 레이아웃 (Python 학습 데이터와 동일한 형식):
-     *   ch 0-2 : linAcc  body frame (중력 없음) — LocalizationViewModel 에서 world frame 으로 회전됨
-     *   ch 3-5 : gyr     body frame             — 동일하게 회전됨
-     *
-     * @return Pair(FloatArray[600], 윈도우_첫_샘플_ts_us) or null
-     */
-    fun getWindow(): Pair<FloatArray, Long>? {
-        val snap = ringBuffer.toArray().filterIsInstance<ImuSample>()
-        if (snap.size < WINDOW_SIZE) return null
-        val recent = snap.takeLast(WINDOW_SIZE)
-        val flat = FloatArray(CHANNEL_NUM * WINDOW_SIZE)
-        for ((t, s) in recent.withIndex()) {
-            flat[0 * WINDOW_SIZE + t] = s.linAcc[0]   // ch 0: linear acc x
-            flat[1 * WINDOW_SIZE + t] = s.linAcc[1]   // ch 1: linear acc y
-            flat[2 * WINDOW_SIZE + t] = s.linAcc[2]   // ch 2: linear acc z
-            flat[3 * WINDOW_SIZE + t] = s.gyr[0]      // ch 3: gyr x
-            flat[4 * WINDOW_SIZE + t] = s.gyr[1]      // ch 4: gyr y
-            flat[5 * WINDOW_SIZE + t] = s.gyr[2]      // ch 5: gyr z
-        }
-        return Pair(flat, recent.first().ts_us)
-    }
-
-    /** 가장 최근 샘플 (EKF 초기화, 타임스탬프 참조용) */
-    fun getLatestSample(): ImuSample? = _latestSample
-}
+            s = propagateQueue
