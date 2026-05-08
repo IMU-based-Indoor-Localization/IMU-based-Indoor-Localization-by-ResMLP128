@@ -375,6 +375,44 @@ void ScEkf::update(const Vec3& meas, const Mat3& meas_cov,
     first_update_ = false;
 }
 
+void ScEkf::apply_position_hold(const Vec3& p_anchor, double sigma_pos) {
+    if (!initialized_) return;
+
+    int N        = state_.N();
+    int sz       = 15 + 6 * N;
+    int pos_base = 6 * N + 6;  // 오차 상태 벡터에서 위치 dp 시작 인덱스
+                                // 상태 배치: [clone×N | dθ(3) dv(3) dp(3) dbg(3) dba(3)]
+
+    // 앵커와 현재 위치 차이가 이미 충분히 작으면 건너뜀 (수치 노이즈 방지)
+    Vec3 innov = p_anchor - state_.p;
+    if (innov.norm() < 1e-6) return;
+
+    // H: 위치 3 성분을 선택하는 3×sz 관측 행렬
+    //   H[0:3, pos_base:pos_base+3] = I₃
+    MatXX H = MatXX::Zero(3, sz);
+    H.block<3, 3>(0, pos_base) = Mat3::Identity();
+
+    // R_pos: 측정 노이즈 (sigma_pos² × I₃)
+    Mat3 R_pos = (sigma_pos * sigma_pos) * Mat3::Identity();
+
+    // 이노베이션 공분산 S = H Σ H^T + R_pos
+    MatXX S = H * Sigma_ * H.transpose() + R_pos;
+
+    // 칼만 이득 K = Σ H^T S^{-1}
+    MatXX K = Sigma_ * H.transpose() * S.inverse();
+
+    // 상태 보정 (위치 오차 외에 속도·자세·편향 교차 공분산도 함께 보정됨)
+    VecX delta_X = K * innov;
+    apply_correction(delta_X);
+
+    // 공분산 갱신 (Joseph form — 수치 안정성)
+    MatXX I_KH = MatXX::Identity(sz, sz) - K * H;
+    MatXX R_dyn = R_pos;
+    Sigma_ = I_KH * Sigma_ * I_KH.transpose()
+           + K * R_dyn * K.transpose();
+    Sigma_ = 0.5 * (Sigma_ + Sigma_.transpose());
+}
+
 void ScEkf::apply_zupt(double sigma_zupt) {
     if (!initialized_) return;
 
@@ -418,40 +456,4 @@ void ScEkf::apply_yaw_update(double yaw_meas, double sigma_yaw) {
 
     int N          = state_.N();
     int sz         = 15 + 6 * N;
-    int theta_base = 6 * N;   // 현재 오차 상태에서 dθ 시작 인덱스
-
-    // ① 현재 yaw 추출: ψ = atan2(R[1,0], R[0,0])
-    double psi_cur = std::atan2(state_.R(1, 0), state_.R(0, 0));
-
-    // ② 이노베이션 계산 ([-π, π] 래핑)
-    double innov = yaw_meas - psi_cur;
-    while (innov >  M_PI) innov -= 2.0 * M_PI;
-    while (innov < -M_PI) innov += 2.0 * M_PI;
-
-    // ③ 이노베이션 게이트: 45° 초과 시 자기 간섭 가능성 → 건너뜀
-    if (std::abs(innov) > 45.0 / 180.0 * M_PI) return;
-
-    // ④ 분모 (gimbal lock 체크)
-    //    denom = R[0,0]² + R[1,0]²  (cos²(pitch) · (...)  — pitch ≈ 90° 시 특이점)
-    double denom = state_.R(0, 0) * state_.R(0, 0)
-                 + state_.R(1, 0) * state_.R(1, 0);
-    if (denom < 1e-8) return;
-
-    // ⑤ 야코비안 H (1 × sz)
-    //    ∂ψ/∂dθ: 왼쪽 SO(3) 교란 dθ 에 대한 yaw 편미분
-    //      ∂ψ/∂dθ[0] = -R[0,0]·R[2,0] / denom
-    //      ∂ψ/∂dθ[1] = -R[1,0]·R[2,0] / denom
-    //      ∂ψ/∂dθ[2] = 1.0
-    Eigen::RowVectorXd H = Eigen::RowVectorXd::Zero(sz);
-    H(theta_base    ) = -state_.R(0, 0) * state_.R(2, 0) / denom;
-    H(theta_base + 1) = -state_.R(1, 0) * state_.R(2, 0) / denom;
-    H(theta_base + 2) =  1.0;
-
-    // ⑥ 측정 노이즈 (scalar)
-    double R_yaw = sigma_yaw * sigma_yaw;
-
-    // ⑦ 이노베이션 공분산 S (scalar)
-    double S_val = (H * Sigma_ * H.transpose())(0, 0) + R_yaw;
-    if (S_val < 1e-12) return;
-
-   
+    int theta_base = 6 * N;   /
