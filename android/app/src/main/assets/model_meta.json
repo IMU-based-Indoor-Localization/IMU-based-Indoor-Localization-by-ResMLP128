@@ -1,0 +1,28 @@
+{
+  "input_len": 100,
+  "input_channel": 6,
+  "output_disp_dim": 3,
+  "output_cov_dim": 3,
+  "output_cls_dim": 7,
+  "imu_freq_hz": 100,
+  "update_freq_hz": 20,
+  "cls_labels": {
+    "0": "unknown",
+    "1": "handbag",
+    "2": "handheld",
+    "3": "pocket",
+    "4": "running",
+    "5": "slow_walk",
+    "6": "trolley"
+  },
+  "ekf_meascov_scale": {
+    "-1": 100.0,
+    "0": 100.0,
+    "1": 50.0,
+    "2": 10.0,
+    "3": 5.0,
+    "4": 50.0,
+    "5": 5.0,
+    "6": 20.0
+  }
+}

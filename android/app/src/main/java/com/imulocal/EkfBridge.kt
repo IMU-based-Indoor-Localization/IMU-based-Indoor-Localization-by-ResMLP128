@@ -1,0 +1,179 @@
+package com.imulocal
+
+import kotlin.math.sqrt
+
+/**
+ * EkfBridge.kt
+ * ============
+ * C++ SC-EKF 와 Kotlin 사이의 JNI 브리지.
+ *
+ * Context-Aware Adaptive EKF (논문 §4.3.2) 구현:
+ *   - 분류 확률 벡터(clsProb[7])를 이용한 소프트 스위칭(soft-switching)
+ *   - Q (σ_na) 와 R (meascov_scale) 을 분류 확률 가중 평균으로 연속 조정
+ *   - Q_adaptive = Σ p_k · Q^(k),  R_adaptive = Σ p_k · R^(k)
+ *
+ * 클래스 인덱스 (train.py LABEL_REMAP 기준):
+ *   0=handbag  1=handheld  2=pocket  3=running  4=slow_walk  5=trolley  6=unknown
+ */
+object EkfBridge {
+
+    init {
+        System.loadLibrary("imu_ekf_jni")
+    }
+
+    // ── 기본 EKF 파라미터 ──────────────────────────────────────
+    // Python filter_batch.py / main_filter.py 기본값과 동일
+    private val DEFAULT_PARAMS = doubleArrayOf(
+        sqrt(1e-3),              // [0]  sigma_na  — 가속도 노이즈 (m/s²)
+        sqrt(1e-4),              // [1]  sigma_ng  — 자이로 노이즈 (rad/s)
+        1e-4,                    // [2]  ita_ba    — 가속도 편향 랜덤워크
+        1e-6,                    // [3]  ita_bg    — 자이로 편향 랜덤워크
+        10.0 / 180.0 * Math.PI, // [4]  init_attitude_sigma (rad)
+        0.1  / 180.0 * Math.PI, // [5]  init_yaw_sigma (rad)
+        1.0,                     // [6]  init_vel_sigma (m/s)
+        0.001,                   // [7]  init_pos_sigma (m)
+        0.0001,                  // [8]  init_bg_sigma (rad/s)
+        0.02,                    // [9]  init_ba_sigma (m/s²)
+        9.81,                    // [10] g_norm (m/s²)
+        10.0                     // [11] meascov_scale 기본값
+    )
+
+    // ── Context-Aware Adaptive EKF 파라미터 테이블 ────────────
+    // 논문 §4.3.2 Table 기반 설계 원칙:
+    //   Running    : Q↑ R↑   (격한 움직임 → 모델 불확실성 및 측정 노이즈 증가)
+    //   Pocket     : Q↓ R↓   (몸에 밀착 → 규칙적 패턴, 낮은 외부 노이즈)
+    //   Handbag    : Q↑ R↑   (진자 운동 패턴, 중간보다 약간 높음)
+    //   Handheld   : Q 기준, R↑ (손 움직임에 의한 불규칙 노이즈 → 기준값)
+    //   Slow Walk  : Q↓ R↓   (느리고 규칙적인 패턴 → 예측 신뢰도 높음)
+    //   Trolley    : Q↓ R↓   (기계적으로 안정적인 움직임)
+    //   Unknown    : Q↑ R↑↑  (분류 불가 → 보수적 처리)
+    //
+    // 인덱스: 0=handbag 1=handheld 2=pocket 3=running 4=slow_walk 5=trolley 6=unknown
+    //
+    // R (meascov_scale): handheld=10.0 기준 ─────────────────────
+    private val R_SCALE_PER_CLASS = doubleArrayOf(
+        15.0,   // 0 handbag    — 진자 운동, 중간↑
+        10.0,   // 1 handheld   — 기준값 (Python batch_runner 기본값)
+         5.0,   // 2 pocket     — 안정적, 측정 신뢰 ↓
+        50.0,   // 3 running    — 격한 움직임, 측정 불신 ↑↑
+         5.0,   // 4 slow_walk  — 매우 규칙적, 측정 신뢰 ↓
+         7.0,   // 5 trolley    — 기계적 안정, 측정 약간 신뢰 ↓
+       100.0    // 6 unknown    — 분류 불가, 보수적 ↑↑↑
+    )
+
+    // Q (sigma_na): sigma_na_base = sqrt(1e-3) ≈ 0.03162 기준 ──
+    // 자이로(sigma_ng)는 휴대 상태에 무관하므로 고정 유지
+    private val SIGMA_NA_BASE = sqrt(1e-3)   // ≈ 0.031623 m/s²
+    private val SIGMA_NG_BASE = sqrt(1e-4)   // ≈ 0.010000 rad/s (불변)
+
+    private val SIGMA_NA_PER_CLASS = doubleArrayOf(
+        SIGMA_NA_BASE * 1.5,   // 0 handbag    — 중간↑ (×1.5)
+        SIGMA_NA_BASE * 1.0,   // 1 handheld   — 기준
+        SIGMA_NA_BASE * 0.5,   // 2 pocket     — 안정적 ↓ (×0.5)
+        SIGMA_NA_BASE * 3.0,   // 3 running    — 격한 움직임 ↑↑ (×3.0)
+        SIGMA_NA_BASE * 0.5,   // 4 slow_walk  — 안정적 ↓ (×0.5)
+        SIGMA_NA_BASE * 0.5,   // 5 trolley    — 기계적 안정 ↓ (×0.5)
+        SIGMA_NA_BASE * 2.0    // 6 unknown    — 보수적 ↑ (×2.0)
+    )
+
+    // ── 공개 API ───────────────────────────────────────────────
+
+    fun create(params: DoubleArray = DEFAULT_PARAMS) {
+        nativeCreate(params)
+    }
+
+    fun initialize(tUs: Long, acc: DoubleArray) {
+        nativeInitialize(tUs, acc)
+    }
+
+    fun propagate(acc: DoubleArray, gyr: DoubleArray,
+                  tUs: Long, tAugmentUs: Long = -1L) {
+        nativePropagate(acc, gyr, tUs, tAugmentUs)
+    }
+
+    fun update(meas: DoubleArray, cov: DoubleArray,
+               tBeginUs: Long, tEndUs: Long) {
+        nativeUpdate(meas, cov, tBeginUs, tEndUs)
+    }
+
+    /** 현재 위치와 표준편차를 반환. [px, py, pz, sx, sy, sz] */
+    fun getPosition(): DoubleArray = nativeGetPosition()
+
+    /** 현재 속도를 반환. [vx, vy, vz] */
+    fun getVelocity(): DoubleArray = nativeGetVelocity()
+
+    /**
+     * Context-Aware Adaptive EKF: 분류 확률 벡터로 Q/R 소프트 스위칭.
+     *
+     * 논문 §4.3.2 수식:
+     *   R_adaptive = Σ p_k · R^(k)
+     *   Q_adaptive = Σ p_k · Q^(k)
+     *
+     * 폴백 처리:
+     *   sum(clsProb) < 0.01 (분류기 없는 EKF_NEW 모델, cls_prob=zeros)
+     *   → handheld 기준값(index=1) 100% 적용 — 고정 파라미터 EKF와 동등
+     *
+     * @param clsProb 분류 헤드의 softmax 출력 [7] (합=1 또는 zeros)
+     */
+    fun applySoftSwitching(clsProb: FloatArray) {
+        val n   = minOf(clsProb.size, R_SCALE_PER_CLASS.size)
+        val sum = clsProb.take(n).sum()
+
+        val prob: FloatArray = if (sum < 0.01f) {
+            // 분류기 없는 모델(EKF_NEW) → handheld 기준값으로 폴백
+            FloatArray(7).also { it[1] = 1.0f }
+        } else {
+            clsProb
+        }
+
+        // 확률 가중 평균: R_adaptive, sigma_na_adaptive
+        var rScale = 0.0
+        var sigNA  = 0.0
+        for (i in 0 until n) {
+            rScale += prob[i] * R_SCALE_PER_CLASS[i]
+            sigNA  += prob[i] * SIGMA_NA_PER_CLASS[i]
+        }
+
+        nativeSetMeasCovScale(rScale)
+        nativeSetProcessNoise(sigNA, SIGMA_NG_BASE)
+    }
+
+    fun marginalize(cutIdx: Int) = nativeMarginalize(cutIdx)
+
+    fun isInitialized(): Boolean = nativeIsInitialized()
+
+    /**
+     * t_begin 클론의 회전 행렬(world←body)을 DoubleArray(9)로 반환 (row-major).
+     * 좌표 변환(transformWindowToWorldFrame)에서 yaw 추출용.
+     */
+    fun getCloneRotation(tBeginUs: Long): DoubleArray = nativeGetCloneRotation(tBeginUs)
+
+    /**
+     * 현재 EKF 자이로 편향 추정값을 DoubleArray(3)으로 반환 [bgx, bgy, bgz] (rad/s).
+     * 좌표 변환(transformWindowToWorldFrame)에서 Rs_bofbi 적분 보정에 사용.
+     */
+    fun getGyrBias(): DoubleArray = nativeGetGyrBias()
+
+    /**
+     * ZUPT (Zero Velocity UPdate): 정지 상태에서 "속도 = 0" 측정값을 EKF에 주입.
+     * @param sigmaZupt 속도 측정 노이즈 표준편차 (m/s, 기본 0.05)
+     */
+    fun applyZupt(sigmaZupt: Double = 0.05) {
+        nativeApplyZupt(sigmaZupt)
+    }
+
+    // ── Native 선언 ────────────────────────────────────────────
+    @JvmStatic external fun nativeCreate(params: DoubleArray)
+    @JvmStatic external fun nativeInitialize(tUs: Long, acc: DoubleArray)
+    @JvmStatic external fun nativePropagate(acc: DoubleArray, gyr: DoubleArray, tUs: Long, tAugmentUs: Long)
+    @JvmStatic external fun nativeUpdate(meas: DoubleArray, cov: DoubleArray, tBeginUs: Long, tEndUs: Long)
+    @JvmStatic external fun nativeGetPosition(): DoubleArray
+    @JvmStatic external fun nativeGetVelocity(): DoubleArray
+    @JvmStatic external fun nativeSetMeasCovScale(scale: Double)
+    @JvmStatic external fun nativeSetProcessNoise(sigmaNA: Double, sigmaNG: Double)
+    @JvmStatic external fun nativeMarginalize(cutIdx: Int)
+    @JvmStatic external fun nativeIsInitialized(): Boolean
+    @JvmStatic external fun nativeGetCloneRotation(tUs: Long): DoubleArray
+    @JvmStatic external fun nativeGetGyrBias(): DoubleArray
+    @JvmStatic external fun nativeApplyZupt(sigma: Double)
+}

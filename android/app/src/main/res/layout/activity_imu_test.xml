@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="#FAFAFA">
+
+    <!-- 헤더 -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="IMU 센서 진단"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:textColor="#1565C0"
+        android:layout_marginBottom="12dp"/>
+
+    <!-- 수신 상태 -->
+    <TextView
+        android:id="@+id/tvStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="● 대기 중"
+        android:textSize="14sp"
+        android:textColor="#757575"
+        android:layout_marginBottom="16dp"/>
+
+    <!-- 가속도계 카드 -->
+    <androidx.cardview.widget.CardView
+        xmlns:app="http://schemas.android.com/apk/res-auto"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        app:cardElevation="2dp"
+        app:cardCornerRadius="8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="14dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="가속도계  (m/s²)"
+                android:textSize="13sp"
+                android:textColor="#757575"
+                android:layout_marginBottom="6dp"/>
+
+            <TextView
+                android:id="@+id/tvAcc"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="X: ---.---    Y: ---.---    Z: ---.---"
+                android:textSize="16sp"
+                android:fontFamily="monospace"
+                android:textColor="#212121"/>
+
+            <TextView
+                android:id="@+id/tvAccNorm"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="|a| = ---.--- m/s²  (정상 ≈ 9.81)"
+                android:textSize="13sp"
+                android:textColor="#757575"
+                android:layout_marginTop="4dp"/>
+        </LinearLayout>
+    </androidx.cardview.widget.CardView>
+
+    <!-- 자이로스코프 카드 -->
+    <androidx.cardview.widget.CardView
+        xmlns:app="http://schemas.android.com/apk/res-auto"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="12dp"
+        app:cardElevation="2dp"
+        app:cardCornerRadius="8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="14dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="자이로스코프  (rad/s)"
+                android:textSize="13sp"
+                android:textColor="#757575"
+                android:layout_marginBottom="6dp"/>
+
+            <TextView
+                android:id="@+id/tvGyr"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="X: ---.---    Y: ---.---    Z: ---.---"
+                android:textSize="16sp"
+                android:fontFamily="monospace"
+                android:textColor="#212121"/>
+
+            <TextView
+                android:id="@+id/tvGyrNorm"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="|ω| = ---.--- rad/s  (정지 시 ≈ 0)"
+                android:textSize="13sp"
+                android:textColor="#757575"
+                android:layout_marginTop="4dp"/>
+        </LinearLayout>
+    </androidx.cardview.widget.CardView>
+
+    <!-- 샘플링 통계 카드 -->
+    <androidx.cardview.widget.CardView
+        xmlns:app="http://schemas.android.com/apk/res-auto"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        app:cardElevation="2dp"
+        app:cardCornerRadius="8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="14dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="샘플링 통계"
+                android:textSize="13sp"
+                android:textColor="#757575"
+                android:layout_marginBottom="6dp"/>
+
+            <TextView
+                android:id="@+id/tvSampleRate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="수신 속도: --- Hz"
+                android:textSize="15sp"
+                android:fontFamily="monospace"/>
+
+            <TextView
+                android:id="@+id/tvSampleCount"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="누적 샘플: 0"
+                android:textSize="14sp"
+                android:fontFamily="monospace"
+                android:textColor="#757575"
+                android:layout_marginTop="4dp"/>
+
+            <TextView
+                android:id="@+id/tvWindowReady"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="100샘플 윈도우: 미완성"
+                android:textSize="14sp"
+                android:layout_marginTop="4dp"/>
+        </LinearLayout>
+    </androidx.cardview.widget.CardView>
+
+    <!-- 버튼 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnTestStart"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="수집 시작"
+            android:layout_marginEnd="8dp"/>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnTestStop"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="수집 정지"
+            android:enabled="false"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
+    </LinearLayout>
+
+</LinearLayout>
