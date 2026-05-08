@@ -54,6 +54,23 @@ import kotlin.math.sqrt
  * ── P1 수정 ────────────────────────────────────────────────
  *  transformWindowToWorldFrame() 에서 자이로 적분 시
  *  EKF bg 편향을 차감하여 Python scekf.py 동작과 일치.
+ *
+ * ── P5 수정 (정지 노이즈 / 이동→정지 프리즈) ─────────────────
+ *  원인: pendingCloneTs.set() 이 정지 판정보다 먼저 실행되어
+ *        정지 중에도 클론이 C++ EKF 에 20Hz 로 삽입되지만
+ *        marginalize() 는 호출되지 않음 → 클론 무한 누적.
+ *        누적된 클론이 propagate() 의 O(N²) 행렬 연산을 폭증시켜
+ *        Default 디스패처 스레드 포화 → 앱 프리즈 유발.
+ *  수정:
+ *    ① runInferStep 에서 정지 판정을 pendingCloneTs.set() 보다 앞으로 이동.
+ *    ② STATIC 브랜치: pendingCloneTs = -1L 로 신규 클론 차단.
+ *    ③ STATIC 브랜치: Channel 잔여 클론 drain 후 C++ 클론 전부 주변화.
+ *       → 정지 상태에서 EKF 상태 벡터를 최소 크기로 유지.
+ *
+ * ── P6 수정 (코루틴 yield 보장) ──────────────────────────────
+ *  원인: inferJob 루프에서 elapsedMs ≥ INFER_INTERVAL_MS 이면
+ *        delay() 를 호출하지 않아 Default 스레드를 양보하지 않음.
+ *  수정: delay(remaining.coerceAtLeast(1L)) 로 항상 최소 1ms yield.
  */
 class LocalizationViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -304,7 +321,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                     runInferStep(localCloneHistory)
                     val elapsedMs = (System.nanoTime() - loopStart) / 1_000_000L
                     val remaining = INFER_INTERVAL_MS - elapsedMs
-                    if (remaining > 2L) delay(remaining)
+                    // P6 수정: 항상 최소 1ms yield → 스레드 기아 방지
+                    delay(remaining.coerceAtLeast(1L))
                 }
             }
 
@@ -359,38 +377,18 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // ① 추론 윈도우 확보 (최소 100 샘플 필요)
         val (window, _) = imuCollector.getWindow() ?: return
 
-        // ② 끝 클론 예약 — 현재 최신 센서 ts 기준 (wall-clock 사용 금지)
-        val tEndTarget = imuCollector.getLatestSample()?.ts_us ?: return
-        pendingCloneTs.set(tEndTarget)
-
-        // ③ propJob 이 클론을 삽입할 때까지 대기 (P4: 20ms → 30ms)
-        delay(CLONE_SETTLE_MS)
-
-        // ④ 실제 삽입된 끝 클론 ts 확인
-        //    tEnd < tEndTarget 이면 아직 미삽입 → 이번 스텝 건너뜀
-        val tEnd = lastInsertedCloneTs.get()
-        if (tEnd < tEndTarget) return
-
-        // ⑤ P3: Channel 에서 새 클론 ts 를 localCloneHistory 로 drain
-        var newTs = cloneChannel.tryReceive().getOrNull()
-        while (newTs != null) {
-            localCloneHistory.addLast(newTs)
-            if (localCloneHistory.size > MAX_CLONE_HISTORY) localCloneHistory.removeFirst()
-            newTs = cloneChannel.tryReceive().getOrNull()
-        }
-
-        // ⑥ 시작 클론 탐색 (~1초 이전, localCloneHistory 에서 가장 가까운 항목)
-        val tBegin = findBeginClone(tEnd, localCloneHistory)
-        if (tBegin < 0L || tBegin >= tEnd) return
-
-        // ⑦-pre: [아이디어 3] Hysteresis 상태 머신 — 이진 임계값의 경계 진동 방지.
+        // ② [P5 수정] Hysteresis 정지 판정을 클론 예약보다 먼저 수행.
         //
-        //  STATIC → MOVING : gyrRms ≥ threshold 가 MOVING_CONFIRM_FRAMES 연속 → 전환
-        //  MOVING → STATIC : gyrRms <  threshold 가 STATIC_CONFIRM_FRAMES  연속 → 전환
+        //  수정 전: pendingCloneTs.set() → delay → 판정 → STATIC 이면 return
+        //           → 정지 중에도 20Hz 로 클론이 C++ EKF 에 삽입됨.
+        //             marginalize() 는 호출 안 되므로 클론 수 무한 증가.
+        //             → propagate() 의 O(N²) 연산 폭증 → 프리즈 유발.
         //
-        //  "후보" 프레임이 확정 기준 미달이면 현재 확정 상태를 유지.
-        //  → 짧은 진동/손 떨림에 의한 STATIC↔MOVING 핑퐁 방지.
-        val gyrRms       = computeGyrRms(window)
+        //  수정 후: 먼저 판정 → STATIC 이면 클론 예약 없이 즉시 ZUPT 처리.
+        //
+        //  STATIC → MOVING : gyrRms ≥ threshold 가 MOVING_CONFIRM_FRAMES 연속
+        //  MOVING → STATIC : gyrRms <  threshold 가 STATIC_CONFIRM_FRAMES  연속
+        val gyrRms        = computeGyrRms(window)
         val isStaticFrame = gyrRms < STATIC_GYR_RMS_THRESHOLD
 
         val currentlyStatic: Boolean = when (motionState) {
@@ -441,14 +439,65 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         }
 
         if (currentlyStatic) {
+            // [P5] 정지 상태: 클론 삽입 차단 + C++ 클론 정리 + ZUPT
+
+            // ① 신규 클론 예약 취소 → propJob 이 추가 클론을 삽입하지 않음
+            pendingCloneTs.set(-1L)
+
+            // ② Channel 잔여 클론을 localCloneHistory 로 drain
+            //    (이전 MOVING 스텝이나 race 로 남은 ts 포함)
+            var ch = cloneChannel.tryReceive().getOrNull()
+            while (ch != null) {
+                localCloneHistory.addLast(ch)
+                if (localCloneHistory.size > MAX_CLONE_HISTORY) localCloneHistory.removeFirst()
+                ch = cloneChannel.tryReceive().getOrNull()
+            }
+
+            // ③ C++ EKF 에 남은 클론 전부 주변화 → 상태 벡터 최소화
+            //    정지 중에는 클론이 불필요. 주변화 후 propagate() 부하 O(15²) 로 복귀.
+            val n = localCloneHistory.size
+            if (n > 0) {
+                try {
+                    EkfBridge.marginalize(n - 1)
+                } catch (e: Exception) {
+                    Log.w(TAG, "STATIC 클론 주변화 실패: ${e.message}")
+                }
+                localCloneHistory.clear()
+            }
+
             Log.d(TAG, "정적 상태 확정 (gyrRms=${"%.4f".format(gyrRms)} rad/s) — ZUPT 적용")
             EkfBridge.applyZupt()
-            // 정지 상태에서도 yaw 보정 주입 (속도 0 확정 + yaw 동시 보정)
             applyRotVecYaw("STATIC")
             return
         }
 
-        // ⑦ body frame → gravity-aligned world frame 좌표 변환
+        // ─── 이동(MOVING) 경로 ────────────────────────────────────────
+
+        // ③ 끝 클론 예약 — 현재 최신 센서 ts 기준 (wall-clock 사용 금지)
+        val tEndTarget = imuCollector.getLatestSample()?.ts_us ?: return
+        pendingCloneTs.set(tEndTarget)
+
+        // ④ propJob 이 클론을 삽입할 때까지 대기 (P4: 20ms → 30ms)
+        delay(CLONE_SETTLE_MS)
+
+        // ⑤ 실제 삽입된 끝 클론 ts 확인
+        //    tEnd < tEndTarget 이면 아직 미삽입 → 이번 스텝 건너뜀
+        val tEnd = lastInsertedCloneTs.get()
+        if (tEnd < tEndTarget) return
+
+        // ⑥ P3: Channel 에서 새 클론 ts 를 localCloneHistory 로 drain
+        var newTs = cloneChannel.tryReceive().getOrNull()
+        while (newTs != null) {
+            localCloneHistory.addLast(newTs)
+            if (localCloneHistory.size > MAX_CLONE_HISTORY) localCloneHistory.removeFirst()
+            newTs = cloneChannel.tryReceive().getOrNull()
+        }
+
+        // ⑦ 시작 클론 탐색 (~1초 이전, localCloneHistory 에서 가장 가까운 항목)
+        val tBegin = findBeginClone(tEnd, localCloneHistory)
+        if (tBegin < 0L || tBegin >= tEnd) return
+
+        // ⑧ body frame → gravity-aligned world frame 좌표 변환
         //    t_begin 클론의 회전 행렬로 yaw를 제거한 월드 프레임으로 변환.
         //    네트워크는 이 프레임에서 학습되었음 (Python dataset.py acc_ga / gyr_ga).
         val R_begin = EkfBridge.getCloneRotation(tBegin)
@@ -459,7 +508,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             window
         }
 
-        // ⑧ 네트워크 추론 실행
+        // ⑩ 네트워크 추론 실행
         val inferStart = System.currentTimeMillis()
         val result = try {
             inferEngine.infer(worldWindow)
@@ -469,12 +518,12 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         }
         val inferLatency = System.currentTimeMillis() - inferStart
 
-        // ⑨ Context-Aware Adaptive EKF: 분류 확률 벡터로 Q/R 소프트 스위칭
+        // ⑪ Context-Aware Adaptive EKF: 분류 확률 벡터로 Q/R 소프트 스위칭
         //    논문 §4.3.2: R_adaptive = Σ p_k·R^(k), Q_adaptive = Σ p_k·Q^(k)
         //    EKF_NEW 모델(분류기 없음)은 clsProb=zeros → handheld 기준값 폴백
         EkfBridge.applySoftSwitching(result.clsProb)
 
-        // ⑩ 변위 측정값 + 공분산 구성
+        // ⑫ 변위 측정값 + 공분산 구성
         val meas = doubleArrayOf(
             result.disp[0].toDouble(),
             result.disp[1].toDouble(),
@@ -487,60 +536,4 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
         // ⑪-post: 비정상 변위 필터링
         //   좌표 변환 오류 또는 네트워크 이상 출력 시 물리적으로 불가능한 변위 제거.
-        //   MAX_DISP_PER_WINDOW_M(6.0m) 초과 = 실내 최대속도(~5m/s) × 1s 초과 → 건너뜀.
-        val dispNorm = sqrt(meas[0] * meas[0] + meas[1] * meas[1] + meas[2] * meas[2])
-        if (dispNorm > MAX_DISP_PER_WINDOW_M) {
-            Log.w(TAG, "비정상 변위 (${"%.2f".format(dispNorm)}m) — EKF 업데이트 건너뜀")
-            return
-        }
-
-        // ⑪-model: [아이디어 5] 모델 단독 위치 누적 — EKF 속도 게이팅 적용.
-        //
-        //  직전 EKF 갱신 후 속도 크기(prevEkfVelNorm)가 MODEL_VELOCITY_GATE 미만이면
-        //  누적을 차단한다.
-        //  ┌─ 이유: 네트워크는 정지 시에도 non-zero displacement 를 출력(바이어스).
-        //  │        EKF 속도가 충분히 작으면 실제로 정지 중임을 의미 → 누적 억제.
-        //  └─ prevEkfVelNorm: 직전 스텝의 EKF update() 후 속도를 저장해 둔 값.
-        //     (이번 스텝 update() 전 속도이므로 1 스텝 지연 — 허용 가능한 오차)
-        if (prevEkfVelNorm >= MODEL_VELOCITY_GATE) {
-            modelPosX += meas[0]
-            modelPosY += meas[1]
-            modelTrackPoints.add(Pair(modelPosX, modelPosY))
-            if (modelTrackPoints.size > 5000) modelTrackPoints.removeAt(0)
-        } else {
-            Log.v(TAG, "모델 only 누적 게이팅 " +
-                  "(velNorm=${"%.3f".format(prevEkfVelNorm)} m/s < $MODEL_VELOCITY_GATE)")
-        }
-
-        // ⑫ EKF 측정 갱신 — t_begin, t_end 모두 si_timestamps_us 에 존재해야 함
-        try {
-            EkfBridge.update(meas, cov, tBegin, tEnd)
-        } catch (e: Exception) {
-            Log.w(TAG, "EKF update 실패: ${e.message}")
-            return
-        }
-
-        // ⑬ 주변화: tBegin 포함 그 이전 클론 모두 제거
-        //    C++ marginalize(idx) 는 0..idx 포함 삭제 (rm = idx+1)
-        if (beginIdx >= 0) {
-            EkfBridge.marginalize(beginIdx)
-            val rm = (beginIdx + 1).coerceAtMost(localCloneHistory.size)
-            repeat(rm) { if (localCloneHistory.isNotEmpty()) localCloneHistory.removeFirst() }
-        }
-
-        // ⑭ Yaw drift 보정 (이동 중): EKF update 직후 주입
-        applyRotVecYaw("MOVING")
-
-        // ⑮ 위치/속도 조회 → UI 갱신
-        val pos = EkfBridge.getPosition()  // [px, py, pz, sx, sy, sz]
-        val vel = EkfBridge.getVelocity()  // [vx, vy, vz]
-
-        // [아이디어 5] 다음 스텝의 모델 only 게이팅을 위해 현재 속도 크기 저장
-        prevEkfVelNorm = sqrt(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2])
-
-        trackPoints.add(Pair(pos[0], pos[1]))
-        if (trackPoints.size > 5000) trackPoints.removeAt(0)
-
-        _state.value = _state.value.copy(
-            position          = Triple(pos[0], pos[1], pos[2]),
-            posStd            = Tripl
+        //   MAX_DISP_PER_WINDOW_M(6.0m) 초과 = �
