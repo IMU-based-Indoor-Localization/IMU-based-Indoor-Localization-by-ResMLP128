@@ -254,6 +254,21 @@ public:
     void apply_zupt(double sigma_zupt = 0.05);
 
     /**
+     * Position Hold: 정지 진입 시 기록한 앵커 위치로 절대 위치를 제약.
+     *
+     * 관측 모델: p_measured = p_anchor  (정지 → 위치는 고정)
+     *   H_pos = [0 | 0 | I₃ | 0 | 0]  (오차 상태 중 위치 블록 선택)
+     *   이노베이션 = p_anchor − p_current
+     *
+     * ZUPT(속도=0)와 함께 사용하면 위치·속도 복합 고정 효과.
+     * 가속도계 바이어스(ba) 적분에 의한 드리프트를 직접 차단.
+     *
+     * @param p_anchor   정지 확정 시점의 EKF 위치 (월드 프레임, m)
+     * @param sigma_pos  위치 측정 노이즈 표준편차 (m, 기본 0.01 = 1 cm)
+     */
+    void apply_position_hold(const Vec3& p_anchor, double sigma_pos = 0.01);
+
+    /**
      * Yaw 절대값 업데이트: Android TYPE_ROTATION_VECTOR 의 yaw 를 EKF 에 주입.
      *
      * 관측 모델: ψ_measured = ψ_current + δψ
@@ -263,18 +278,4 @@ public:
      *
      * @param yaw_meas   EKF 월드 프레임 기준 측정 yaw (rad).
      *                   = atan2(R_rv[1,0], R_rv[0,0]) - yaw_rv_at_init
-     * @param sigma_yaw  측정 노이즈 표준편차 (rad, 기본 10° ≈ 0.1745)
-     */
-    void apply_yaw_update(double yaw_meas,
-                          double sigma_yaw = 10.0 / 180.0 * M_PI);
-
-    // ── 상태 조회 ───────────────────────────────────────────
-    bool        is_initialized()  const { return initialized_; }
-    const FilterState& state()    const { return state_; }
-    const MatXX&       covariance() const { return Sigma_; }
-
-    /** 현재 위치 (월드 프레임) */
-    Vec3 position() const { return state_.p; }
-    /** 현재 속도 (월드 프레임) */
-    Vec3 velocity() const { return state_.v; }
-    /** 위치 표준편차 [σx, σy,
+     * @param sigma

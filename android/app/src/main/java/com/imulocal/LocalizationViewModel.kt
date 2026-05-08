@@ -141,15 +141,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
          */
         private const val MODEL_VELOCITY_GATE = 0.05  // m/s
 
-        // ── [P7] zero-displacement EKF 업데이트 공분산 ───────────────
-        /**
-         * 정지 상태에서 사용하는 zero-displacement 측정 공분산 (m²).
-         * std = sqrt(1e-4) ≈ 0.01 m = 1 cm.
-         * 네트워크 평균 공분산(exp(-2)≈0.13 m²) 대비 훨씬 강한 위치 고정 제약.
-         * Python imu_tracker.py 의 STATIC_DISP_COV 와 동일값.
-         */
-        private const val STATIC_DISP_COV = 1e-4  // m²
-
         // ── Yaw drift 보정 파라미터 ──────────────────────────────────
         /**
          * TYPE_ROTATION_VECTOR yaw 측정 노이즈 표준편차 (rad).
@@ -200,6 +191,13 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
     /** STATIC 상태에서 연속으로 gyrRms ≥ threshold 인 프레임 수 (→ MOVING 전환 카운터). */
     private var movingCandidateCount  = 0
+
+    /**
+     * [P8] Position Hold 앵커 위치.
+     * STATIC 첫 프레임에 EKF 위치를 기록, 이후 STATIC 기간 내내 이 지점으로 위치 제약.
+     * MOVING 프레임 또는 reset() 시 null 로 초기화.
+     */
+    private var staticAnchorPos: DoubleArray? = null
 
     // ── [아이디어 5] 직전 EKF 갱신 후 속도 크기 (m/s) ───────────────
     /** EKF update() 직후 조회한 속도 노름 — 다음 스텝 모델 only 게이팅에 사용. */
@@ -363,6 +361,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         motionState          = MotionState.STATIC
         staticCandidateCount = 0
         movingCandidateCount = 0
+        // [P8] Position Hold 앵커 초기화
+        staticAnchorPos      = null
         // [아이디어 5] 속도 게이트 초기화
         prevEkfVelNorm       = 0.0
         // 원점 복귀 감지 초기화
@@ -445,72 +445,47 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         }
 
         if (currentlyStatic) {
-            // [P7] 정지 상태: zero-displacement EKF 업데이트 + ZUPT
+            // [P8] 정지 상태: Position Hold + ZUPT (근본 해결)
             //
-            // P5 방식은 클론 삽입을 차단하여 네트워크 추론 / EKF update() 가 실행되지 않아
-            // 위치 제약이 없었음 → 정지 중 EKF 위치 드리프트 발생.
+            // 문제 원인:
+            //   ZUPT 는 속도만 0 으로 제약; 위치는 직접 제약하지 않음.
+            //   가속도계 바이어스(ba) 잔류 오차 → ZUPT 사이클마다 0.5·ba·dt² 위치 적분
+            //   → 정지 중에도 위치가 서서히 드리프트 → 발산 후 복귀 패턴.
             //
-            // P7 방식:
-            //  ① 클론 정상 삽입 (MOVING 경로와 동일)
-            //  ② tBegin 탐색 성공 시 meas=(0,0,0) + STATIC_DISP_COV 로 EKF update()
-            //     → 위치를 현재 지점에 강하게 고정 (std ≈ 1 cm)
-            //  ③ marginalize() → 클론 수 정상 유지 (O(N²) 누적 없음)
-            //  ④ applyZupt() → 속도 0 제약 (복합 제약)
+            // P8 해결책:
+            //   ① STATIC 첫 프레임: EKF 현재 위치를 앵커(staticAnchorPos)로 기록.
+            //   ② 매 STATIC 프레임: applyPositionHold(앵커) → "현재 위치 = 앵커" 절대 제약
+            //      (H = [0|0|I₃|0|0], 이노베이션 = 앵커 - p_current)
+            //   ③ applyZupt() → "속도 = 0" 제약 병행
+            //   ④ 클론 삽입 없음 (P5 방식 유지) → O(N²) 프리즈 방지
             //
-            // tBegin 을 찾지 못한 경우(클론 수 부족): ZUPT 만 적용 후 종료.
+            // 효과: 위치·속도 양쪽 모두 제약 → 가속도계 바이어스 적분 드리프트 완전 차단.
 
-            // ① 끝 클론 예약 (MOVING 경로와 동일)
-            val tEndTarget = imuCollector.getLatestSample()?.ts_us ?: return
-            pendingCloneTs.set(tEndTarget)
+            // ① 클론 삽입 차단 (프리즈 방지, P5 유지)
+            pendingCloneTs.set(-1L)
 
-            // ② propJob 이 클론을 삽입할 때까지 대기
-            delay(CLONE_SETTLE_MS)
-
-            // ③ 삽입 확인 — 미삽입 시 ZUPT 만 적용
-            val tEnd = lastInsertedCloneTs.get()
-            if (tEnd < tEndTarget) {
-                Log.d(TAG, "STATIC: 클론 미삽입 — ZUPT 만 적용")
-                EkfBridge.applyZupt()
-                applyRotVecYaw("STATIC")
-                return
+            // ② 앵커 기록 (STATIC 기간 중 첫 프레임에만 실행)
+            if (staticAnchorPos == null) {
+                staticAnchorPos = EkfBridge.getPosition().take(3).toDoubleArray()
+                Log.d(TAG, "STATIC 앵커 설정: " +
+                      "(${"%.3f".format(staticAnchorPos!![0])}, " +
+                      "${"%.3f".format(staticAnchorPos!![1])}, " +
+                      "${"%.3f".format(staticAnchorPos!![2])}) m")
             }
 
-            // ④ Channel drain → localCloneHistory
-            var ch = cloneChannel.tryReceive().getOrNull()
-            while (ch != null) {
-                localCloneHistory.addLast(ch)
-                if (localCloneHistory.size > MAX_CLONE_HISTORY) localCloneHistory.removeFirst()
-                ch = cloneChannel.tryReceive().getOrNull()
+            // ③ Position Hold: 앵커 위치로 EKF 절대 위치 제약
+            staticAnchorPos?.let { anchor ->
+                EkfBridge.applyPositionHold(anchor[0], anchor[1], anchor[2])
             }
 
-            // ⑤ 시작 클론 탐색
-            val tBegin = findBeginClone(tEnd, localCloneHistory)
-            if (tBegin >= 0L && tBegin < tEnd) {
-                // ⑥ zero-displacement EKF 업데이트 → 위치 고정
-                val zeroMeas = doubleArrayOf(0.0, 0.0, 0.0)
-                val staticCov = buildStaticCovMatrix()
-                try {
-                    EkfBridge.update(zeroMeas, staticCov, tBegin, tEnd)
-                } catch (e: Exception) {
-                    Log.w(TAG, "STATIC zero-disp EKF 업데이트 실패: ${e.message}")
-                }
-                // ⑦ 주변화 → 클론 수 정상 관리
-                val beginIdx = localCloneHistory.indexOfFirst { it == tBegin }
-                if (beginIdx >= 0) {
-                    EkfBridge.marginalize(beginIdx)
-                    val rm = (beginIdx + 1).coerceAtMost(localCloneHistory.size)
-                    repeat(rm) { if (localCloneHistory.isNotEmpty()) localCloneHistory.removeFirst() }
-                }
-                Log.d(TAG, "STATIC zero-disp 업데이트 완료 (gyrRms=${"%.4f".format(gyrRms)} rad/s)")
-            } else {
-                Log.d(TAG, "STATIC: tBegin 미발견 — ZUPT 만 적용")
-            }
-
-            // ⑧ ZUPT: 속도 0 제약 + yaw 보정
+            // ④ ZUPT: 속도 0 제약 + yaw 보정
             EkfBridge.applyZupt()
             applyRotVecYaw("STATIC")
             return
         }
+
+        // MOVING 브랜치 진입 시 앵커 해제 (다음 STATIC 때 새로 기록)
+        staticAnchorPos = null
 
         // ─── 이동(MOVING) 경로 ────────────────────────────────────────
 
@@ -531,4 +506,32 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         while (newTs != null) {
             localCloneHistory.addLast(newTs)
             if (localCloneHistory.size > MAX_CLONE_HISTORY) localCloneHistory.removeFirst()
-           
+            newTs = cloneChannel.tryReceive().getOrNull()
+        }
+
+        // ⑦ 시작 클론 탐색 (~1초 이전, localCloneHistory 에서 가장 가까운 항목)
+        val tBegin = findBeginClone(tEnd, localCloneHistory)
+        if (tBegin < 0L || tBegin >= tEnd) return
+
+        // ⑧ body frame → gravity-aligned world frame 좌표 변환
+        //    t_begin 클론의 회전 행렬로 yaw를 제거한 월드 프레임으로 변환.
+        //    네트워크는 이 프레임에서 학습되었음 (Python dataset.py acc_ga / gyr_ga).
+        val R_begin = EkfBridge.getCloneRotation(tBegin)
+        val worldWindow = if (R_begin.size == 9) {
+            transformWindowToWorldFrame(window, R_begin)
+        } else {
+            Log.w(TAG, "클론 회전 없음 (tBegin=$tBegin) — body frame 그대로 사용 (정확도 저하)")
+            window
+        }
+
+        // ⑩ 네트워크 추론 실행
+        val inferStart = System.currentTimeMillis()
+        val result = try {
+            inferEngine.infer(worldWindow)
+        } catch (e: Exception) {
+            Log.w(TAG, "추론 실패: ${e.message}")
+            return
+        }
+        val inferLatency = System.currentTimeMillis() - inferStart
+
+        // ⑪ Context-Awar

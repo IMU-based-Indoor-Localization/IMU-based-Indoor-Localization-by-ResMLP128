@@ -163,6 +163,19 @@ object EkfBridge {
     }
 
     /**
+     * Position Hold: 정지 진입 시 기록한 앵커 위치를 EKF 절대 위치 측정값으로 주입.
+     * ZUPT(속도=0)와 함께 사용하면 위치·속도 복합 고정 효과.
+     * 가속도계 바이어스 적분에 의한 정지 중 드리프트를 근본적으로 차단.
+     *
+     * @param px, py, pz  정지 확정 시점의 EKF 위치 (월드 프레임, m)
+     * @param sigmaPos    위치 측정 노이즈 표준편차 (m, 기본 0.01 = 1 cm)
+     */
+    fun applyPositionHold(px: Double, py: Double, pz: Double,
+                          sigmaPos: Double = 0.01) {
+        nativeApplyPositionHold(px, py, pz, sigmaPos)
+    }
+
+    /**
      * Yaw 업데이트: Android TYPE_ROTATION_VECTOR 의 절대 yaw 를 EKF 에 주입.
      *
      * yaw_meas 는 EKF 월드 프레임 기준으로 계산해야 함:
@@ -170,16 +183,3 @@ object EkfBridge {
      *            - atan2(R_rv_init[1,0], R_rv_init[0,0])  (초기화 시점 오프셋)
      *
      * 이노베이션 |δψ| > 45° 이면 자기 간섭으로 판단하여 C++ 내부에서 자동 스킵.
-     *
-     * @param yawMeas   EKF 프레임 yaw 측정값 (rad)
-     * @param sigmaYaw  측정 노이즈 표준편차 (rad, 기본 10° = 0.1745 rad)
-     */
-    fun applyYawUpdate(yawMeas: Double,
-                       sigmaYaw: Double = 10.0 / 180.0 * Math.PI) {
-        nativeApplyYawUpdate(yawMeas, sigmaYaw)
-    }
-
-    // ── Native 선언 ────────────────────────────────────────────
-    @JvmStatic external fun nativeCreate(params: DoubleArray)
-    @JvmStatic external fun nativeInitialize(tUs: Long, acc: DoubleArray)
-    @JvmStatic external fun nativePropagat
