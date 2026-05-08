@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- IMU 실내 측위 앱 아이콘 (위치 핀 모양) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 위치 핀 몸통 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,20 C42,20 32,30 32,42 C32,58 54,88 54,88 C54,88 76,58 76,42 C76,30 66,20 54,20 Z"/>
+
+    <!-- 위치 핀 내부 원 (파랑) -->
+    <path
+        android:fillColor="#1565C0"
+        android:pathData="M54,34 A8,8 0 1,1 54,50 A8,8 0 1,1 54,34 Z"/>
+</vector>

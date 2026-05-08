@@ -1,6 +1,0 @@
-{
-    "imu_freq": 100,
-    "past_time": 0.0,
-    "window_time": 1.0,
-    "arch": "twolayer"
-}
