@@ -106,10 +106,12 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
          * body frame 자이로 3축 RMS 가 이 값 미만이면 정지로 판단 → EKF 업데이트 건너뜀.
          * 정지 MEMS 자이로 노이즈 ≈ 0.003-0.01 rad/s RMS.
          * 보행 자이로 ≈ 0.1-0.5 rad/s RMS.
-         * 0.03 rad/s: 정지 노이즈(0.01) 3× → 충분한 여유; 느린 보행(0.05+)은 오감지하지 않음.
-         * 이전 0.05 는 느린 보행 초기 구간을 억제 → 시작 지연 유발.
+         * [P9 조정] 0.03 → 0.08 rad/s:
+         * 실기기/에뮬레이터 MEMS 자이로 정지 노이즈가 0.03을 초과하는 경우가 많음.
+         * STATIC 앵커 로그가 전혀 찍히지 않을 경우(정지 미감지) 이 값을 올린다.
+         * 0.08 rad/s ≈ 4.6°/s — 느린 걷기(보통 0.15+ rad/s)와 충분히 구분됨.
          */
-        private const val STATIC_GYR_RMS_THRESHOLD = 0.03f  // rad/s
+        private const val STATIC_GYR_RMS_THRESHOLD = 0.08f  // rad/s
 
         /**
          * 1-초 윈도우당 최대 허용 변위 (m).
@@ -397,6 +399,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //  MOVING → STATIC : gyrRms <  threshold 가 STATIC_CONFIRM_FRAMES  연속
         val gyrRms        = computeGyrRms(window)
         val isStaticFrame = gyrRms < STATIC_GYR_RMS_THRESHOLD
+        // [진단] 정지 감지 여부 실시간 확인 — 필요 시 주석 처리
+        Log.v(TAG, "gyrRms=${"%.4f".format(gyrRms)} thr=$STATIC_GYR_RMS_THRESHOLD static=$isStaticFrame state=$motionState")
 
         val currentlyStatic: Boolean = when (motionState) {
             MotionState.STATIC -> {
@@ -799,16 +803,3 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         if (angle < 1e-10) return doubleArrayOf(1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0)
         val ux = phiX/angle;  val uy = phiY/angle;  val uz = phiZ/angle
         val c = cos(angle);   val s = sin(angle);   val oc = 1.0 - c
-        return doubleArrayOf(
-            c + ux*ux*oc,       ux*uy*oc - uz*s,   ux*uz*oc + uy*s,
-            uy*ux*oc + uz*s,    c + uy*uy*oc,      uy*uz*oc - ux*s,
-            uz*ux*oc - uy*s,    uz*uy*oc + ux*s,   c + uz*uz*oc
-        )
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        stop()
-        inferEngine.release()
-    }
-}
