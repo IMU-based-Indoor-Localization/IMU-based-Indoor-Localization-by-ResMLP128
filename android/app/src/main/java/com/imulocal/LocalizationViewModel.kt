@@ -159,6 +159,24 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
          * 지자기 노이즈가 적은 환경이면 5° 로 줄여도 무방.
          */
         private const val YAW_SIGMA_RAD = 10.0 / 180.0 * Math.PI
+
+        // ── [P10] 최초 이동 발산 방지 파라미터 ─────────────────────────
+        /**
+         * 추론 윈도우의 동적 구간 최소 비율 (0.0~1.0).
+         * WINDOW_SIZE=100 샘플(1초) 중 이 비율 이상이 gyr > threshold 여야 추론 실행.
+         *
+         * 최초 이동 시 윈도우는 [정지 85%][이동 15%] 혼합 → 네트워크 출력 오염.
+         * 0.5(50%) 요구 → 이동 시작 후 ~0.5초 후부터 추론 허용.
+         * cloneHistory 요구(~1초)와 맞물려 혼합 윈도우 업데이트를 실질적으로 차단.
+         */
+        private const val MIN_DYNAMIC_FRACTION = 0.5f
+
+        /**
+         * EKF 업데이트 후 속도 크기 상한 (m/s).
+         * 실내 최고 보행속도 ≈ 3 m/s. 초과 시 EKF 발산으로 판단 → ZUPT 강제 적용.
+         * 발산 감지 후 안전망(reactive divergence recovery).
+         */
+        private const val MAX_POST_UPDATE_SPEED = 3.0  // m/s
     }
 
     // ── 의존 컴포넌트 ────────────────────────────────────────────
@@ -536,6 +554,17 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         val tBegin = findBeginClone(tEnd, localCloneHistory)
         if (tBegin < 0L || tBegin >= tEnd) return
 
+        // ⑦-P10: 윈도우 동적 비율 게이팅
+        //   최초 이동 시 추론 윈도우(1초)는 [정지 데이터 85%][이동 15%] 혼합됨.
+        //   네트워크는 이 혼합 윈도우에서 오염된 변위를 예측 → EKF 발산.
+        //   윈도우 내 gyr > threshold 인 샘플 비율이 MIN_DYNAMIC_FRACTION 미만이면 건너뜀.
+        //   cloneHistory 요구(~1초)와 맞물려 혼합 윈도우 업데이트를 이중으로 차단.
+        val dynamicFrac = computeDynamicFraction(window)
+        if (dynamicFrac < MIN_DYNAMIC_FRACTION) {
+            Log.v(TAG, "윈도우 동적 비율 부족 (${"%.2f".format(dynamicFrac)} < $MIN_DYNAMIC_FRACTION) — 업데이트 스킵")
+            return
+        }
+
         // ⑧ body frame → gravity-aligned world frame 좌표 변환
         //    t_begin 클론의 회전 행렬로 yaw를 제거한 월드 프레임으로 변환.
         //    네트워크는 이 프레임에서 학습되었음 (Python dataset.py acc_ga / gyr_ga).
@@ -606,6 +635,21 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         } catch (e: Exception) {
             Log.w(TAG, "EKF update 실패: ${e.message}")
             return
+        }
+
+        // ⑫-P10: 사후 속도 안전망 (Reactive Divergence Recovery)
+        //   EKF update() 후 속도가 MAX_POST_UPDATE_SPEED 초과 시 발산 판정.
+        //   강제 ZUPT(sigma=0.01 m/s, 거의 하드 리셋 수준)로 속도를 0으로 압축.
+        //   이후 EKF 는 정상 상태로 복귀 — 궤적 점프는 발생하나 지속 발산은 방지.
+        val postUpdateVel = EkfBridge.getVelocity()
+        val postUpdateSpeed = sqrt(
+            postUpdateVel[0] * postUpdateVel[0] +
+            postUpdateVel[1] * postUpdateVel[1] +
+            postUpdateVel[2] * postUpdateVel[2]
+        )
+        if (postUpdateSpeed > MAX_POST_UPDATE_SPEED) {
+            Log.w(TAG, "발산 감지: 속도 ${"%.2f".format(postUpdateSpeed)} m/s > ${MAX_POST_UPDATE_SPEED} — ZUPT 강제 적용")
+            EkfBridge.applyZupt(0.01)
         }
 
         // ⑬ 주변화: tBegin 포함 그 이전 클론 모두 제거
@@ -700,6 +744,27 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         return sqrt(sumSq / N)
     }
 
+    /**
+     * [P10] 추론 윈도우에서 동적 샘플(gyr > threshold)의 비율을 반환.
+     *
+     * 최초 이동 시 윈도우는 정지/이동 혼합 → 네트워크 추론 오염 → 발산.
+     * 이 값이 MIN_DYNAMIC_FRACTION 미만이면 추론을 건너뛰어 혼합 입력을 차단.
+     *
+     * @return 0.0(전부 정지) ~ 1.0(전부 이동)
+     */
+    private fun computeDynamicFraction(window: FloatArray): Float {
+        val N = ImuCollector.WINDOW_SIZE
+        var dynamicCount = 0
+        for (t in 0 until N) {
+            val gx = window[3 * N + t]
+            val gy = window[4 * N + t]
+            val gz = window[5 * N + t]
+            val mag = sqrt((gx * gx + gy * gy + gz * gz).toDouble()).toFloat()
+            if (mag >= STATIC_GYR_RMS_THRESHOLD) dynamicCount++
+        }
+        return dynamicCount.toFloat() / N
+    }
+
     // ── 헬퍼: body frame → gravity-aligned world frame 좌표 변환 ──
     /**
      * Python imu_tracker.py 의 get_displacement_and_cov_from_network() 에 해당하는 변환.
@@ -712,78 +777,4 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
      *  4. 각 샘플: linAcc_w = Rs_net[t] @ linAcc_body,  gyr_w = Rs_net[t] @ gyr_body
      *
      * @param window   FloatArray[6×100] channel-major, body frame (ch0-2: linAcc, ch3-5: gyr)
-     * @param R_begin  DoubleArray[9] row-major 3×3 회전 행렬 (world←body at t_begin)
-     * @return         FloatArray[6×100] channel-major, gravity-aligned world frame
-     */
-    private fun transformWindowToWorldFrame(window: FloatArray, R_begin: DoubleArray): FloatArray {
-        val N  = ImuCollector.WINDOW_SIZE
-        val dt = 1.0 / ImuCollector.TARGET_HZ  // 0.01 s
-
-        // ① yaw 각도 추출: ZYX 컨벤션에서 yaw = atan2(R[1,0], R[0,0])
-        val ri_z = atan2(R_begin[3], R_begin[0])
-        val cosZ = cos(ri_z);  val sinZ = sin(ri_z)
-
-        // ② Ri_z^T (yaw rotation 의 전치 — yaw 제거용)
-        // Ri_z = [[cosZ,-sinZ,0],[sinZ,cosZ,0],[0,0,1]]
-        // Ri_z^T = [[cosZ,sinZ,0],[-sinZ,cosZ,0],[0,0,1]]
-        val Ri_zT = doubleArrayOf(
-             cosZ,  sinZ, 0.0,
-            -sinZ,  cosZ, 0.0,
-             0.0,   0.0,  1.0
-        )
-
-        // ③ R_yawfree = Ri_z^T @ R_begin
-        val R_yf = mat3mul(Ri_zT, R_begin)
-
-        // ④ EKF 자이로 편향 취득 (P1 수정: Python scekf.py bg 보정과 동일)
-        //    EKF bg 는 body frame 편향. 보정된 자이로 = gyr_raw − bg
-        val bg = EkfBridge.getGyrBias()   // [bgx, bgy, bgz] rad/s
-        val bgX = bg[0]; val bgY = bg[1]; val bgZ = bg[2]
-
-        // ⑤ 각 샘플별 변환
-        val result = FloatArray(6 * N)
-        // Rs_bofbi: t_begin 에서 현재 body 까지의 상대 회전 (초기값 = Identity)
-        var Rs = doubleArrayOf(1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0)
-
-        for (t in 0 until N) {
-            val lx = window[0*N+t].toDouble()
-            val ly = window[1*N+t].toDouble()
-            val lz = window[2*N+t].toDouble()
-            val gx = window[3*N+t].toDouble()
-            val gy = window[4*N+t].toDouble()
-            val gz = window[5*N+t].toDouble()
-
-            // ⑥ Rs_bofbi 업데이트: Rs[t] = Rs[t-1] @ exp((gyr[t] − bg) * dt)
-            //    Python imu_tracker.py 와 동일한 순서:
-            //      for j in range(1, N): Rs[j] = Rs[j-1] @ mat_exp((gyr[j] − bg) * dt)
-            //    → 현재 샘플의 gyr 로 먼저 업데이트, 이후 회전 적용.
-            //    수정 전: 루프 끝에서 gyr[t]로 갱신 → t+1 샘플에 gyr[t] 적용 (1 샘플 오프셋)
-            if (t > 0) {
-                Rs = mat3mul(Rs, rodrigues((gx - bgX) * dt, (gy - bgY) * dt, (gz - bgZ) * dt))
-            }
-
-            // Rs_net[t] = R_yf @ Rs_bofbi[t]
-            val Rnet = mat3mul(R_yf, Rs)
-
-            // linAcc_world = Rnet @ linAcc_body
-            result[0*N+t] = (Rnet[0]*lx + Rnet[1]*ly + Rnet[2]*lz).toFloat()
-            result[1*N+t] = (Rnet[3]*lx + Rnet[4]*ly + Rnet[5]*lz).toFloat()
-            result[2*N+t] = (Rnet[6]*lx + Rnet[7]*ly + Rnet[8]*lz).toFloat()
-
-            // gyr_world = Rnet @ gyr_body
-            result[3*N+t] = (Rnet[0]*gx + Rnet[1]*gy + Rnet[2]*gz).toFloat()
-            result[4*N+t] = (Rnet[3]*gx + Rnet[4]*gy + Rnet[5]*gz).toFloat()
-            result[5*N+t] = (Rnet[6]*gx + Rnet[7]*gy + Rnet[8]*gz).toFloat()
-        }
-        return result
-    }
-
-    // ── 헬퍼: Yaw 보정 주입 ──────────────────────────────────────
-    /**
-     * TYPE_ROTATION_VECTOR 에서 추출한 yaw 를 EKF 에 주입.
-     *
-     * 계산:
-     *   yaw_meas = yaw_rv_current − yaw_rv_at_init
-     *            → EKF 월드 프레임 기준 상대 yaw (초기화 시 = 0)
-     *
-     * 건너뛰는 경�
+     * @param R
