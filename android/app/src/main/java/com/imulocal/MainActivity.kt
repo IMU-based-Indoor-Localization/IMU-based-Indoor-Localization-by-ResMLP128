@@ -71,8 +71,10 @@ class MainActivity : AppCompatActivity() {
                 // 추론 latency
                 binding.tvLatency.text = "추론 지연: ${s.inferLatency} ms"
 
-                // 경로 뷰 갱신 (EKF 궤적만 표시 — 모델 only 는 일시 제외)
-                binding.trackView.updatePaths(s.trackPoints, emptyList())
+                // [진단] 모델 only 궤적 활성화 — 네트워크 출력 원본 확인용
+                // 파랑=EKF+모델, 주황=모델only(네트워크 raw 누적)
+                // 주황도 발산하면 → 네트워크 문제 / 파랑만 발산하면 → EKF 문제
+                binding.trackView.updatePaths(s.trackPoints, s.modelTrackPoints)
             }
         }
     }
@@ -116,3 +118,4 @@ class MainActivity : AppCompatActivity() {
         file.writeText(csv)
         Toast.makeText(this, "경로 저장: ${file.name}", Toast.LENGTH_LONG).show()
     }
+}
