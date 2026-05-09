@@ -269,6 +269,21 @@ public:
     void apply_position_hold(const Vec3& p_anchor, double sigma_pos = 0.01);
 
     /**
+     * [P9] Hard State Freeze: EKF 측정 모델 우회하여 직접 상태·공분산 고정.
+     *
+     * apply_position_hold() + apply_zupt() 조합은 칼만 게인이 충분히 크지 않으면
+     * 위치 드리프트를 막지 못한다. 이 함수는 EKF 업데이트를 완전히 우회하여
+     * 직접 state_.p = p_anchor, state_.v = 0 으로 설정하고
+     * 공분산 Σ[v,v], Σ[p,p] 블록을 거의 0 으로 압축(1e-8)한다.
+     *
+     * 정지 상태에서 매 IMU 프레임마다 호출하면 가속도계 바이어스 적분에 의한
+     * 위치·속도 발산을 완전히 차단한다.
+     *
+     * @param p_anchor  정지 확정 시점의 EKF 위치 (월드 프레임, m)
+     */
+    void freeze_static_state(const Vec3& p_anchor);
+
+    /**
      * Yaw 절대값 업데이트: Android TYPE_ROTATION_VECTOR 의 yaw 를 EKF 에 주입.
      *
      * 관측 모델: ψ_measured = ψ_current + δψ
@@ -278,4 +293,42 @@ public:
      *
      * @param yaw_meas   EKF 월드 프레임 기준 측정 yaw (rad).
      *                   = atan2(R_rv[1,0], R_rv[0,0]) - yaw_rv_at_init
-     * @param sigma
+     * @param sigma_yaw  측정 노이즈 표준편차 (rad, 기본 10° ≈ 0.1745)
+     */
+    void apply_yaw_update(double yaw_meas,
+                          double sigma_yaw = 10.0 / 180.0 * M_PI);
+
+    // ── 상태 조회 ───────────────────────────────────────────
+    bool        is_initialized()  const { return initialized_; }
+    const FilterState& state()    const { return state_; }
+    const MatXX&       covariance() const { return Sigma_; }
+
+    /** 현재 위치 (월드 프레임) */
+    Vec3 position() const { return state_.p; }
+    /** 현재 속도 (월드 프레임) */
+    Vec3 velocity() const { return state_.v; }
+    /** 위치 표준편차 [σx, σy, σz] */
+    Vec3 position_std() const;
+
+private:
+    FilterConfig cfg_;
+    FilterState  state_;
+    MatXX        Sigma_;    ///< 전체 공분산 (15+6N × 15+6N)
+    Eigen::Matrix<double,6,6> W_;  ///< IMU 노이즈 공분산
+    MatXX        Q_;               ///< 프로세스 노이즈 (편향 랜덤워크)
+
+    bool   initialized_{false};
+    bool   first_update_{true};
+
+    void reset_covariance();
+    void build_noise_matrices();
+    void apply_correction(const VecX& delta_X);
+
+    /** 전체 공분산에서 15차원 오차 공분산 블록을 반환 */
+    Mat15 Sigma15() const {
+        int sz = static_cast<int>(Sigma_.rows());
+        return Sigma_.block<15,15>(sz-15, sz-15);
+    }
+};
+
+} // namespace imu_ekf

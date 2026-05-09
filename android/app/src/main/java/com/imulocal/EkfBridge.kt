@@ -176,6 +176,20 @@ object EkfBridge {
     }
 
     /**
+     * [P9] Hard State Freeze: EKF 측정 모델 완전 우회, 상태 직접 고정.
+     *
+     * apply_position_hold() + apply_zupt() 조합은 init_pos_sigma(0.001)에 비해
+     * sigma_pos(0.01)가 10× 크면 칼만 게인 K≈0.01 → 보정이 거의 이루어지지 않음.
+     * 이 함수는 칼만 게인 없이 직접 state_.p = p_anchor, state_.v = 0 으로 고정하고
+     * Σ[v,v], Σ[p,p] 블록을 1e-8 로 압축한다.
+     *
+     * @param px, py, pz  정지 확정 시점의 EKF 위치 (월드 프레임, m)
+     */
+    fun freezeStaticState(px: Double, py: Double, pz: Double) {
+        nativeFreezeStaticState(px, py, pz)
+    }
+
+    /**
      * Yaw 업데이트: Android TYPE_ROTATION_VECTOR 의 절대 yaw 를 EKF 에 주입.
      *
      * yaw_meas 는 EKF 월드 프레임 기준으로 계산해야 함:
@@ -183,3 +197,30 @@ object EkfBridge {
      *            - atan2(R_rv_init[1,0], R_rv_init[0,0])  (초기화 시점 오프셋)
      *
      * 이노베이션 |δψ| > 45° 이면 자기 간섭으로 판단하여 C++ 내부에서 자동 스킵.
+     *
+     * @param yawMeas   EKF 프레임 yaw 측정값 (rad)
+     * @param sigmaYaw  측정 노이즈 표준편차 (rad, 기본 10° = 0.1745 rad)
+     */
+    fun applyYawUpdate(yawMeas: Double,
+                       sigmaYaw: Double = 10.0 / 180.0 * Math.PI) {
+        nativeApplyYawUpdate(yawMeas, sigmaYaw)
+    }
+
+    // ── Native 선언 ────────────────────────────────────────────
+    @JvmStatic external fun nativeCreate(params: DoubleArray)
+    @JvmStatic external fun nativeInitialize(tUs: Long, acc: DoubleArray)
+    @JvmStatic external fun nativePropagate(acc: DoubleArray, gyr: DoubleArray, tUs: Long, tAugmentUs: Long)
+    @JvmStatic external fun nativeUpdate(meas: DoubleArray, cov: DoubleArray, tBeginUs: Long, tEndUs: Long)
+    @JvmStatic external fun nativeGetPosition(): DoubleArray
+    @JvmStatic external fun nativeGetVelocity(): DoubleArray
+    @JvmStatic external fun nativeSetMeasCovScale(scale: Double)
+    @JvmStatic external fun nativeSetProcessNoise(sigmaNA: Double, sigmaNG: Double)
+    @JvmStatic external fun nativeMarginalize(cutIdx: Int)
+    @JvmStatic external fun nativeIsInitialized(): Boolean
+    @JvmStatic external fun nativeGetCloneRotation(tUs: Long): DoubleArray
+    @JvmStatic external fun nativeGetGyrBias(): DoubleArray
+    @JvmStatic external fun nativeApplyZupt(sigma: Double)
+    @JvmStatic external fun nativeApplyYawUpdate(yawMeas: Double, sigmaYaw: Double)
+    @JvmStatic external fun nativeApplyPositionHold(px: Double, py: Double, pz: Double, sigmaPos: Double)
+    @JvmStatic external fun nativeFreezeStaticState(px: Double, py: Double, pz: Double)
+}

@@ -193,8 +193,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     private var movingCandidateCount  = 0
 
     /**
-     * [P8] Position Hold 앵커 위치.
-     * STATIC 첫 프레임에 EKF 위치를 기록, 이후 STATIC 기간 내내 이 지점으로 위치 제약.
+     * [P9] Hard State Freeze 앵커 위치.
+     * STATIC 첫 프레임에 EKF 위치를 기록, 이후 STATIC 기간 내내
+     * freezeStaticState(앵커)를 호출하여 EKF 상태를 직접 고정.
      * MOVING 프레임 또는 reset() 시 null 로 초기화.
      */
     private var staticAnchorPos: DoubleArray? = null
@@ -445,41 +446,39 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         }
 
         if (currentlyStatic) {
-            // [P8] 정지 상태: Position Hold + ZUPT (근본 해결)
+            // [P9] 정지 상태: Hard State Freeze (EKF 측정 우회 직접 고정)
             //
-            // 문제 원인:
-            //   ZUPT 는 속도만 0 으로 제약; 위치는 직접 제약하지 않음.
-            //   가속도계 바이어스(ba) 잔류 오차 → ZUPT 사이클마다 0.5·ba·dt² 위치 적분
-            //   → 정지 중에도 위치가 서서히 드리프트 → 발산 후 복귀 패턴.
+            // 문제 원인 (P8 실패 이유):
+            //   apply_position_hold(sigma=0.01) + apply_zupt() 조합은
+            //   init_pos_sigma=0.001 → Σ[p,p]=1e-6 m²,  R_pos=(0.01)²=1e-4 m²
+            //   → 칼만 게인 K = 1e-6 / (1e-6 + 1e-4) ≈ 0.01 → 보정 1% 미만
+            //   → 사실상 위치 고정 불가 → 발산 지속.
             //
-            // P8 해결책:
-            //   ① STATIC 첫 프레임: EKF 현재 위치를 앵커(staticAnchorPos)로 기록.
-            //   ② 매 STATIC 프레임: applyPositionHold(앵커) → "현재 위치 = 앵커" 절대 제약
-            //      (H = [0|0|I₃|0|0], 이노베이션 = 앵커 - p_current)
-            //   ③ applyZupt() → "속도 = 0" 제약 병행
-            //   ④ 클론 삽입 없음 (P5 방식 유지) → O(N²) 프리즈 방지
-            //
-            // 효과: 위치·속도 양쪽 모두 제약 → 가속도계 바이어스 적분 드리프트 완전 차단.
+            // P9 해결책:
+            //   freezeStaticState() — EKF 측정 모델 완전 우회:
+            //   ① state_.p = p_anchor  (직접 위치 고정)
+            //   ② state_.v = Vec3::Zero()  (직접 속도 0)
+            //   ③ Σ[v,v], Σ[p,p] 블록 행·열 전부 0, 대각만 1e-8 (교차 공분산 제거)
+            //   → 칼만 게인 없이 완전 고정 → 가속도계 바이어스 적분 드리프트 100% 차단
 
-            // ① 클론 삽입 차단 (프리즈 방지, P5 유지)
+            // ① 클론 삽입 차단 (P5 방식 유지)
             pendingCloneTs.set(-1L)
 
             // ② 앵커 기록 (STATIC 기간 중 첫 프레임에만 실행)
             if (staticAnchorPos == null) {
                 staticAnchorPos = EkfBridge.getPosition().take(3).toDoubleArray()
-                Log.d(TAG, "STATIC 앵커 설정: " +
+                Log.d(TAG, "STATIC 앵커 설정[P9]: " +
                       "(${"%.3f".format(staticAnchorPos!![0])}, " +
                       "${"%.3f".format(staticAnchorPos!![1])}, " +
                       "${"%.3f".format(staticAnchorPos!![2])}) m")
             }
 
-            // ③ Position Hold: 앵커 위치로 EKF 절대 위치 제약
+            // ③ Hard State Freeze: 위치·속도 직접 고정 + 공분산 압축
             staticAnchorPos?.let { anchor ->
-                EkfBridge.applyPositionHold(anchor[0], anchor[1], anchor[2])
+                EkfBridge.freezeStaticState(anchor[0], anchor[1], anchor[2])
             }
 
-            // ④ ZUPT: 속도 0 제약 + yaw 보정
-            EkfBridge.applyZupt()
+            // ④ yaw 보정 (자이로 편향 보조 — 회전 드리프트 억제)
             applyRotVecYaw("STATIC")
             return
         }
@@ -534,4 +533,282 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         }
         val inferLatency = System.currentTimeMillis() - inferStart
 
-        // ⑪ Context-Awar
+        // ⑪ Context-Aware Adaptive EKF: 분류 확률 벡터로 Q/R 소프트 스위칭
+        //    논문 §4.3.2: R_adaptive = Σ p_k·R^(k), Q_adaptive = Σ p_k·Q^(k)
+        //    EKF_NEW 모델(분류기 없음)은 clsProb=zeros → handheld 기준값 폴백
+        EkfBridge.applySoftSwitching(result.clsProb)
+
+        // ⑫ 변위 측정값 + 공분산 구성
+        val meas = doubleArrayOf(
+            result.disp[0].toDouble(),
+            result.disp[1].toDouble(),
+            result.disp[2].toDouble()
+        )
+        val cov = buildCovMatrix(result.dispCov)
+
+        // ⑪ t_begin 인덱스 (주변화 기준) — localCloneHistory 에서 직접 탐색
+        val beginIdx = localCloneHistory.indexOfFirst { it == tBegin }
+
+        // ⑪-post: 비정상 변위 필터링
+        //   좌표 변환 오류 또는 네트워크 이상 출력 시 물리적으로 불가능한 변위 제거.
+        //   MAX_DISP_PER_WINDOW_M(6.0m) 초과 = 실내 최대속도(~5m/s) × 1s 초과 → 건너뜀.
+        val dispNorm = sqrt(meas[0] * meas[0] + meas[1] * meas[1] + meas[2] * meas[2])
+        if (dispNorm > MAX_DISP_PER_WINDOW_M) {
+            Log.w(TAG, "비정상 변위 (${"%.2f".format(dispNorm)}m) — EKF 업데이트 건너뜀")
+            return
+        }
+
+        // ⑪-model: [아이디어 5] 모델 단독 위치 누적 — EKF 속도 게이팅 적용.
+        //
+        //  직전 EKF 갱신 후 속도 크기(prevEkfVelNorm)가 MODEL_VELOCITY_GATE 미만이면
+        //  누적을 차단한다.
+        //  ┌─ 이유: 네트워크는 정지 시에도 non-zero displacement 를 출력(바이어스).
+        //  │        EKF 속도가 충분히 작으면 실제로 정지 중임을 의미 → 누적 억제.
+        //  └─ prevEkfVelNorm: 직전 스텝의 EKF update() 후 속도를 저장해 둔 값.
+        //     (이번 스텝 update() 전 속도이므로 1 스텝 지연 — 허용 가능한 오차)
+        if (prevEkfVelNorm >= MODEL_VELOCITY_GATE) {
+            modelPosX += meas[0]
+            modelPosY += meas[1]
+            modelTrackPoints.add(Pair(modelPosX, modelPosY))
+            if (modelTrackPoints.size > 5000) modelTrackPoints.removeAt(0)
+        } else {
+            Log.v(TAG, "모델 only 누적 게이팅 " +
+                  "(velNorm=${"%.3f".format(prevEkfVelNorm)} m/s < $MODEL_VELOCITY_GATE)")
+        }
+
+        // ⑫ EKF 측정 갱신 — t_begin, t_end 모두 si_timestamps_us 에 존재해야 함
+        try {
+            EkfBridge.update(meas, cov, tBegin, tEnd)
+        } catch (e: Exception) {
+            Log.w(TAG, "EKF update 실패: ${e.message}")
+            return
+        }
+
+        // ⑬ 주변화: tBegin 포함 그 이전 클론 모두 제거
+        //    C++ marginalize(idx) 는 0..idx 포함 삭제 (rm = idx+1)
+        if (beginIdx >= 0) {
+            EkfBridge.marginalize(beginIdx)
+            val rm = (beginIdx + 1).coerceAtMost(localCloneHistory.size)
+            repeat(rm) { if (localCloneHistory.isNotEmpty()) localCloneHistory.removeFirst() }
+        }
+
+        // ⑭ Yaw drift 보정 (이동 중): EKF update 직후 주입
+        applyRotVecYaw("MOVING")
+
+        // ⑮ 위치/속도 조회 → UI 갱신
+        val pos = EkfBridge.getPosition()  // [px, py, pz, sx, sy, sz]
+        val vel = EkfBridge.getVelocity()  // [vx, vy, vz]
+
+        // [아이디어 5] 다음 스텝의 모델 only 게이팅을 위해 현재 속도 크기 저장
+        prevEkfVelNorm = sqrt(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2])
+
+        trackPoints.add(Pair(pos[0], pos[1]))
+        if (trackPoints.size > 5000) trackPoints.removeAt(0)
+
+        _state.value = _state.value.copy(
+            position          = Triple(pos[0], pos[1], pos[2]),
+            posStd            = Triple(pos[3], pos[4], pos[5]),
+            velocity          = Triple(vel[0], vel[1], vel[2]),
+            carryMode         = result.className,
+            carryProb         = result.clsProb.maxOrNull() ?: 0f,
+            trackPoints       = trackPoints.toList(),
+            modelTrackPoints  = modelTrackPoints.toList(),
+            inferLatency      = inferLatency
+        )
+    }
+
+    // ── 헬퍼: 시작 클론 탐색 ─────────────────────────────────────
+    /**
+     * localCloneHistory 에서 (tEndUs - WINDOW_DURATION_US) 에 가장 가까운 항목 반환.
+     * 허용 오차 CLONE_MATCH_TOL_US 초과 시 -1L 반환.
+     * inferJob 전용 history 를 직접 참조하므로 락 불필요.
+     */
+    private fun findBeginClone(tEndUs: Long, history: ArrayDeque<Long>): Long {
+        if (history.isEmpty()) return -1L
+        val target   = tEndUs - WINDOW_DURATION_US
+        var best     = history[0]
+        var bestDiff = abs(best - target)
+        for (ts in history) {
+            val diff = abs(ts - target)
+            if (diff < bestDiff) { bestDiff = diff; best = ts }
+        }
+        return if (bestDiff <= CLONE_MATCH_TOL_US) best else -1L
+    }
+
+    // ── 헬퍼: 변위 공분산 행렬 구성 ────────────────────────────
+    /**
+     * 네트워크 출력 log-variance → variance 변환 후 3×3 대각 행렬(row-major).
+     *
+     * Python 원본(meas_source_torchscript.py):
+     *   meas_cov[meas_cov < -4] = -4   ← exp(-4) ≈ 0.018 m² 가 최소 분산
+     *
+     * 이전 코드는 variance를 1e-6 까지 허용해 과도한 신뢰 가능성이 있었음.
+     * log-variance를 -4 에서 클리핑 후 exp 적용으로 Python 동작과 일치.
+     */
+    private fun buildCovMatrix(dispCov: FloatArray): DoubleArray {
+        val cov = DoubleArray(9) { 0.0 }
+        for (i in 0 until 3) {
+            val logVar = dispCov[i].toDouble().coerceAtLeast(-4.0)  // Python: clip < -4
+            cov[i * 3 + i] = exp(logVar).coerceAtMost(100.0)
+        }
+        return cov
+    }
+
+    // ── 헬퍼: 자이로 RMS 계산 (정적 상태 판정용) ─────────────────
+    /**
+     * body frame window 에서 자이로(ch 3-5) 3축 합산 RMS 를 반환 (rad/s).
+     * 정지 판정에 사용: 이 값이 STATIC_GYR_RMS_THRESHOLD 미만이면 정적.
+     *
+     * 계산: sqrt( mean_over_t( gx²+gy²+gz² ) )
+     * = sqrt( (Σ(gx²+gy²+gz²)) / N )
+     */
+    private fun computeGyrRms(window: FloatArray): Float {
+        val N = ImuCollector.WINDOW_SIZE
+        var sumSq = 0f
+        for (t in 0 until N) {
+            val gx = window[3 * N + t]
+            val gy = window[4 * N + t]
+            val gz = window[5 * N + t]
+            sumSq += gx * gx + gy * gy + gz * gz
+        }
+        return sqrt(sumSq / N)
+    }
+
+    // ── 헬퍼: body frame → gravity-aligned world frame 좌표 변환 ──
+    /**
+     * Python imu_tracker.py 의 get_displacement_and_cov_from_network() 에 해당하는 변환.
+     *
+     * 알고리즘:
+     *  1. t_begin 의 EKF 회전 R_begin (world←body) 에서 yaw 를 제거 → R_yawfree
+     *  2. EKF 자이로 편향 bg 를 가져와 보정된 자이로로 상대 회전 Rs_bofbi[t] 적분
+     *     → Python scekf.py 의 (net_gyr[j] − bg) × dt 와 동일
+     *  3. Rs_net[t] = R_yawfree @ Rs_bofbi[t]
+     *  4. 각 샘플: linAcc_w = Rs_net[t] @ linAcc_body,  gyr_w = Rs_net[t] @ gyr_body
+     *
+     * @param window   FloatArray[6×100] channel-major, body frame (ch0-2: linAcc, ch3-5: gyr)
+     * @param R_begin  DoubleArray[9] row-major 3×3 회전 행렬 (world←body at t_begin)
+     * @return         FloatArray[6×100] channel-major, gravity-aligned world frame
+     */
+    private fun transformWindowToWorldFrame(window: FloatArray, R_begin: DoubleArray): FloatArray {
+        val N  = ImuCollector.WINDOW_SIZE
+        val dt = 1.0 / ImuCollector.TARGET_HZ  // 0.01 s
+
+        // ① yaw 각도 추출: ZYX 컨벤션에서 yaw = atan2(R[1,0], R[0,0])
+        val ri_z = atan2(R_begin[3], R_begin[0])
+        val cosZ = cos(ri_z);  val sinZ = sin(ri_z)
+
+        // ② Ri_z^T (yaw rotation 의 전치 — yaw 제거용)
+        // Ri_z = [[cosZ,-sinZ,0],[sinZ,cosZ,0],[0,0,1]]
+        // Ri_z^T = [[cosZ,sinZ,0],[-sinZ,cosZ,0],[0,0,1]]
+        val Ri_zT = doubleArrayOf(
+             cosZ,  sinZ, 0.0,
+            -sinZ,  cosZ, 0.0,
+             0.0,   0.0,  1.0
+        )
+
+        // ③ R_yawfree = Ri_z^T @ R_begin
+        val R_yf = mat3mul(Ri_zT, R_begin)
+
+        // ④ EKF 자이로 편향 취득 (P1 수정: Python scekf.py bg 보정과 동일)
+        //    EKF bg 는 body frame 편향. 보정된 자이로 = gyr_raw − bg
+        val bg = EkfBridge.getGyrBias()   // [bgx, bgy, bgz] rad/s
+        val bgX = bg[0]; val bgY = bg[1]; val bgZ = bg[2]
+
+        // ⑤ 각 샘플별 변환
+        val result = FloatArray(6 * N)
+        // Rs_bofbi: t_begin 에서 현재 body 까지의 상대 회전 (초기값 = Identity)
+        var Rs = doubleArrayOf(1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0)
+
+        for (t in 0 until N) {
+            val lx = window[0*N+t].toDouble()
+            val ly = window[1*N+t].toDouble()
+            val lz = window[2*N+t].toDouble()
+            val gx = window[3*N+t].toDouble()
+            val gy = window[4*N+t].toDouble()
+            val gz = window[5*N+t].toDouble()
+
+            // ⑥ Rs_bofbi 업데이트: Rs[t] = Rs[t-1] @ exp((gyr[t] − bg) * dt)
+            //    Python imu_tracker.py 와 동일한 순서:
+            //      for j in range(1, N): Rs[j] = Rs[j-1] @ mat_exp((gyr[j] − bg) * dt)
+            //    → 현재 샘플의 gyr 로 먼저 업데이트, 이후 회전 적용.
+            //    수정 전: 루프 끝에서 gyr[t]로 갱신 → t+1 샘플에 gyr[t] 적용 (1 샘플 오프셋)
+            if (t > 0) {
+                Rs = mat3mul(Rs, rodrigues((gx - bgX) * dt, (gy - bgY) * dt, (gz - bgZ) * dt))
+            }
+
+            // Rs_net[t] = R_yf @ Rs_bofbi[t]
+            val Rnet = mat3mul(R_yf, Rs)
+
+            // linAcc_world = Rnet @ linAcc_body
+            result[0*N+t] = (Rnet[0]*lx + Rnet[1]*ly + Rnet[2]*lz).toFloat()
+            result[1*N+t] = (Rnet[3]*lx + Rnet[4]*ly + Rnet[5]*lz).toFloat()
+            result[2*N+t] = (Rnet[6]*lx + Rnet[7]*ly + Rnet[8]*lz).toFloat()
+
+            // gyr_world = Rnet @ gyr_body
+            result[3*N+t] = (Rnet[0]*gx + Rnet[1]*gy + Rnet[2]*gz).toFloat()
+            result[4*N+t] = (Rnet[3]*gx + Rnet[4]*gy + Rnet[5]*gz).toFloat()
+            result[5*N+t] = (Rnet[6]*gx + Rnet[7]*gy + Rnet[8]*gz).toFloat()
+        }
+        return result
+    }
+
+    // ── 헬퍼: Yaw 보정 주입 ──────────────────────────────────────
+    /**
+     * TYPE_ROTATION_VECTOR 에서 추출한 yaw 를 EKF 에 주입.
+     *
+     * 계산:
+     *   yaw_meas = yaw_rv_current − yaw_rv_at_init
+     *            → EKF 월드 프레임 기준 상대 yaw (초기화 시 = 0)
+     *
+     * 건너뛰는 경우:
+     *  - rotVecSensor 없음 (NaN)
+     *  - EKF 미초기화 (yawRvAtInit = NaN)
+     *  - 이노베이션 > 45° (C++ 내부에서 자동 거부)
+     *
+     * @param phase 로그용 태그 ("STATIC" / "MOVING")
+     */
+    private fun applyRotVecYaw(phase: String) {
+        if (yawRvAtInit.isNaN()) return
+        val yawRvCurrent = imuCollector.getLatestYawRad()
+        if (yawRvCurrent.isNaN()) return
+
+        // EKF 프레임 기준 yaw: 초기화 시점 오프셋 차감
+        var yawMeas = yawRvCurrent.toDouble() - yawRvAtInit
+        // [-π, π] 래핑
+        while (yawMeas >  Math.PI) yawMeas -= 2.0 * Math.PI
+        while (yawMeas < -Math.PI) yawMeas += 2.0 * Math.PI
+
+        EkfBridge.applyYawUpdate(yawMeas, YAW_SIGMA_RAD)
+        Log.v(TAG, "[$phase] Yaw 보정 주입: ${"%.1f".format(Math.toDegrees(yawMeas))}°")
+    }
+
+    /** 3×3 행렬 곱셈 (row-major) */
+    private fun mat3mul(A: DoubleArray, B: DoubleArray): DoubleArray {
+        val C = DoubleArray(9)
+        for (i in 0..2) for (j in 0..2) for (k in 0..2)
+            C[i*3+j] += A[i*3+k] * B[k*3+j]
+        return C
+    }
+
+    /**
+     * Rodrigues 공식: 각속도-시간 벡터 phi = [phiX, phiY, phiZ] → 3×3 회전 행렬
+     * phi 의 크기가 회전각(rad), 방향이 회전축.
+     */
+    private fun rodrigues(phiX: Double, phiY: Double, phiZ: Double): DoubleArray {
+        val angle = sqrt(phiX*phiX + phiY*phiY + phiZ*phiZ)
+        if (angle < 1e-10) return doubleArrayOf(1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0)
+        val ux = phiX/angle;  val uy = phiY/angle;  val uz = phiZ/angle
+        val c = cos(angle);   val s = sin(angle);   val oc = 1.0 - c
+        return doubleArrayOf(
+            c + ux*ux*oc,       ux*uy*oc - uz*s,   ux*uz*oc + uy*s,
+            uy*ux*oc + uz*s,    c + uy*uy*oc,      uy*uz*oc - ux*s,
+            uz*ux*oc - uy*s,    uz*uy*oc + ux*s,   c + uz*uz*oc
+        )
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        stop()
+        inferEngine.release()
+    }
+}
