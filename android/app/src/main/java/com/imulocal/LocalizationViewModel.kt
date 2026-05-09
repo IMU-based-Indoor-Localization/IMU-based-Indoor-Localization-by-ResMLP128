@@ -418,6 +418,16 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                         Log.d(TAG, "상태 전환: STATIC → MOVING " +
                               "(gyrRms=${"%.4f".format(gyrRms)} rad/s, " +
                               "velNorm=${"%.3f".format(prevEkfVelNorm)} m/s)")
+                        // [P9c] STATIC→MOVING 전환 시 stale 클론 이중 플러시
+                        // ① Kotlin localCloneHistory: STATIC 이전 타임스탬프 제거
+                        //    → findBeginClone() 이 stale tBegin 을 찾지 못하게 함
+                        // ② C++ EKF 내부 클론: marginalize 미호출로 남은 오래된 클론 제거
+                        //    → update(tBegin, tEnd) 에서 존재하지 않는 클론 참조 방지
+                        // 두 플러시 후 ~1초간 tBegin 미확보 → update() 자동 스킵
+                        // → 새 클론 ~1초 누적 후 정상 재개
+                        localCloneHistory.clear()
+                        EkfBridge.flushClones()
+                        Log.d(TAG, "STATIC→MOVING: 클론 이중 플러시 (Kotlin+C++) — stale 발산 방지")
                         false   // 이번 프레임부터 추론 진행
                     } else {
                         // 아직 MOVING 미확정 → 정지로 유지
@@ -783,23 +793,4 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         while (yawMeas < -Math.PI) yawMeas += 2.0 * Math.PI
 
         EkfBridge.applyYawUpdate(yawMeas, YAW_SIGMA_RAD)
-        Log.v(TAG, "[$phase] Yaw 보정 주입: ${"%.1f".format(Math.toDegrees(yawMeas))}°")
-    }
-
-    /** 3×3 행렬 곱셈 (row-major) */
-    private fun mat3mul(A: DoubleArray, B: DoubleArray): DoubleArray {
-        val C = DoubleArray(9)
-        for (i in 0..2) for (j in 0..2) for (k in 0..2)
-            C[i*3+j] += A[i*3+k] * B[k*3+j]
-        return C
-    }
-
-    /**
-     * Rodrigues 공식: 각속도-시간 벡터 phi = [phiX, phiY, phiZ] → 3×3 회전 행렬
-     * phi 의 크기가 회전각(rad), 방향이 회전축.
-     */
-    private fun rodrigues(phiX: Double, phiY: Double, phiZ: Double): DoubleArray {
-        val angle = sqrt(phiX*phiX + phiY*phiY + phiZ*phiZ)
-        if (angle < 1e-10) return doubleArrayOf(1.0,0.0,0.0, 0.0,1.0,0.0, 0.0,0.0,1.0)
-        val ux = phiX/angle;  val uy = phiY/angle;  val uz = phiZ/angle
-        val c = cos(angle);   val s = sin(angle);   val oc = 1.0 - c
+        Log.v(TAG, "[$phase] Yaw 보정

@@ -140,6 +140,13 @@ object EkfBridge {
 
     fun marginalize(cutIdx: Int) = nativeMarginalize(cutIdx)
 
+    /**
+     * [P9c] STATIC→MOVING 전환 시 EKF 내 모든 stale 클론을 제거.
+     * STATIC 중 marginalize가 호출되지 않아 오래된 클론이 남아있으면
+     * update() 이노베이션이 폭발하는 문제를 방지.
+     */
+    fun flushClones() = nativeFlushClones()
+
     fun isInitialized(): Boolean = nativeIsInitialized()
 
     /**
@@ -219,8 +226,4 @@ object EkfBridge {
     @JvmStatic external fun nativeIsInitialized(): Boolean
     @JvmStatic external fun nativeGetCloneRotation(tUs: Long): DoubleArray
     @JvmStatic external fun nativeGetGyrBias(): DoubleArray
-    @JvmStatic external fun nativeApplyZupt(sigma: Double)
-    @JvmStatic external fun nativeApplyYawUpdate(yawMeas: Double, sigmaYaw: Double)
-    @JvmStatic external fun nativeApplyPositionHold(px: Double, py: Double, pz: Double, sigmaPos: Double)
-    @JvmStatic external fun nativeFreezeStaticState(px: Double, py: Double, pz: Double)
-}
+    @JvmStatic external fun nativeApplyZupt(

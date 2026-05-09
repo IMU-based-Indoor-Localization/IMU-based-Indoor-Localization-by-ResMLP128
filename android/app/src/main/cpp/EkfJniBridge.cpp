@@ -259,6 +259,26 @@ Java_com_imulocal_EkfBridge_nativeIsInitialized(
 }
 
 // ─────────────────────────────────────────────────────────────
+// [P9c] JNI: 클론 전체 플러시 (STATIC→MOVING 전환 시 stale 클론 제거)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * EKF 내부의 모든 클론(과거 상태 사본)을 제거.
+ * STATIC 중 marginalize가 호출되지 않아 stale 클론이 남아있을 때 사용.
+ * marginalize(N-1)을 호출하면 인덱스 0..N-1 전부 삭제됨.
+ */
+JNIEXPORT void JNICALL
+Java_com_imulocal_EkfBridge_nativeFlushClones(
+        JNIEnv* /*env*/, jclass /*cls*/) {
+
+    std::lock_guard<std::mutex> lock(g_ekf_mutex);
+    if (g_ekf && g_ekf->is_initialized()) {
+        int N = g_ekf->clone_count();
+        if (N > 0) g_ekf->marginalize(N - 1);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // JNI: 클론 회전 행렬 반환 (좌표 변환용)
 // ─────────────────────────────────────────────────────────────
 
@@ -391,27 +411,4 @@ Java_com_imulocal_EkfBridge_nativeFreezeStaticState(
     }
 }
 
-// ─────────────────────────────────────────────────────────────
-// JNI: Yaw 절대값 업데이트 (TYPE_ROTATION_VECTOR 기반)
-// ─────────────────────────────────────────────────────────────
-
-/**
- * Android TYPE_ROTATION_VECTOR 에서 추출한 yaw 를 EKF 에 주입.
- *
- * yaw_meas = atan2(R_rv[1,0], R_rv[0,0]) - yaw_rv_at_init
- *   → EKF 월드 프레임 기준 상대 yaw (초기화 시점 = 0)
- *
- * @param yaw_meas  EKF 프레임 yaw 측정값 (rad)
- * @param sigma_yaw 측정 노이즈 표준편차 (rad)
- */
-JNIEXPORT void JNICALL
-Java_com_imulocal_EkfBridge_nativeApplyYawUpdate(
-        JNIEnv* /*env*/, jclass /*cls*/, jdouble yaw_meas, jdouble sigma_yaw) {
-
-    std::lock_guard<std::mutex> lock(g_ekf_mutex);
-    if (g_ekf && g_ekf->is_initialized())
-        g_ekf->apply_yaw_update(static_cast<double>(yaw_meas),
-                                static_cast<double>(sigma_yaw));
-}
-
-} // extern "C"
+// ─────────────────────────────────────────────────────�
