@@ -634,15 +634,14 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //  │        EKF 속도가 충분히 작으면 실제로 정지 중임을 의미 → 누적 억제.
         //  └─ prevEkfVelNorm: 직전 스텝의 EKF update() 후 속도를 저장해 둔 값.
         //     (이번 스텝 update() 전 속도이므로 1 스텝 지연 — 허용 가능한 오차)
-        if (prevEkfVelNorm >= MODEL_VELOCITY_GATE) {
-            modelPosX += meas[0]
-            modelPosY += meas[1]
-            modelTrackPoints.add(Pair(modelPosX, modelPosY))
-            if (modelTrackPoints.size > 5000) modelTrackPoints.removeAt(0)
-        } else {
-            Log.v(TAG, "모델 only 누적 게이팅 " +
-                  "(velNorm=${"%.3f".format(prevEkfVelNorm)} m/s < $MODEL_VELOCITY_GATE)")
-        }
+        // [진단] 모델 only 무조건 누적 — EKF 속도 게이팅 제거
+        // 네트워크 raw 출력을 있는 그대로 누적하여 EKF 없이 궤적이 어떻게 나오는지 확인.
+        // 정상이면 주황 궤적이 실제 이동과 비슷해야 함.
+        modelPosX += meas[0]
+        modelPosY += meas[1]
+        modelTrackPoints.add(Pair(modelPosX, modelPosY))
+        if (modelTrackPoints.size > 5000) modelTrackPoints.removeAt(0)
+        Log.d(TAG, "모델 raw: dx=${"%.3f".format(meas[0])} dy=${"%.3f".format(meas[1])} dz=${"%.3f".format(meas[2])} norm=${"%.3f".format(dispNorm)}m")
 
         // ⑫ EKF 측정 갱신 — t_begin, t_end 모두 si_timestamps_us 에 존재해야 함
         try {
@@ -768,5 +767,4 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     /**
      * [P10] 추론 윈도우에서 동적 샘플(gyr > threshold)의 비율을 반환.
      *
-     * 최초 이동 시 윈도우는 정지/이동 혼합 → 네트워크 추론 오염 → 발산.
-     * 이 값이 MIN_DYNAMIC_FRACTION 미만이면 추론을 건너뛰어 혼합 입력을 차단.
+     * 최초 
