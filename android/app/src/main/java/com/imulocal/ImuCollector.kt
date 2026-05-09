@@ -84,6 +84,20 @@ class ImuCollector(context: Context) : SensorEventListener {
      */
     @Volatile private var latestYawRad: Float = Float.NaN
 
+    /**
+     * [P11] TYPE_ROTATION_VECTOR 지자기계 정확도.
+     *
+     * Android SensorManager 상수:
+     *   SENSOR_STATUS_UNRELIABLE  = 0  (자기 캘리브레이션 안됨)
+     *   SENSOR_STATUS_ACCURACY_LOW    = 1
+     *   SENSOR_STATUS_ACCURACY_MEDIUM = 2
+     *   SENSOR_STATUS_ACCURACY_HIGH   = 3
+     *
+     * 초기값 0(UNRELIABLE): 첫 정확도 콜백 전까지 yaw 보정을 막아 잘못된 주입 방지.
+     * onAccuracyChanged 에서 TYPE_ROTATION_VECTOR 의 정확도만 추적.
+     */
+    @Volatile private var rotVecAccuracy: Int = 0  // 0 = SENSOR_STATUS_UNRELIABLE
+
     // ── EKF 전파용 큐 (소비 후 비워짐) ──────────────────────────
     private val propagateQueue = ConcurrentLinkedQueue<ImuSample>()
 
@@ -108,6 +122,7 @@ class ImuCollector(context: Context) : SensorEventListener {
         latestGyrTs   = -1L
         latestLinAcc  = FloatArray(3)
         latestYawRad  = Float.NaN
+        rotVecAccuracy = 0  // 재시작 시 UNRELIABLE 로 초기화
         propagateQueue.clear()
         ringBuffer.clear()
         _latestSample = null
@@ -137,7 +152,20 @@ class ImuCollector(context: Context) : SensorEventListener {
     }
 
     // ── SensorEventListener ──────────────────────────────────────
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        // [P11] TYPE_ROTATION_VECTOR 정확도 추적 — 지자기계 품질 게이팅에 사용
+        if (sensor?.type == Sensor.TYPE_ROTATION_VECTOR) {
+            rotVecAccuracy = accuracy
+            Log.d(TAG, "RotVec 정확도 변경: $accuracy " +
+                  when (accuracy) {
+                      0 -> "(UNRELIABLE)"
+                      1 -> "(LOW)"
+                      2 -> "(MEDIUM)"
+                      3 -> "(HIGH)"
+                      else -> "(?)"
+                  })
+        }
+    }
 
     override fun onSensorChanged(event: SensorEvent) {
         val tsUs = event.timestamp / 1000L   // ns → μs
@@ -199,4 +227,54 @@ class ImuCollector(context: Context) : SensorEventListener {
         var s = propagateQueue.poll()
         while (s != null) {
             result.add(s)
-            s = propagateQueue
+            s = propagateQueue.poll()
+        }
+        return result
+    }
+
+    // ── 추론용 ───────────────────────────────────────────────────
+    /**
+     * 최근 WINDOW_SIZE 샘플을 channel-major FloatArray(600) 로 반환.
+     *
+     * 채널 레이아웃 (Python 학습 데이터와 동일한 형식):
+     *   ch 0-2 : linAcc  body frame (중력 없음) — LocalizationViewModel 에서 world frame 으로 회전됨
+     *   ch 3-5 : gyr     body frame             — 동일하게 회전됨
+     *
+     * @return Pair(FloatArray[600], 윈도우_첫_샘플_ts_us) or null
+     */
+    fun getWindow(): Pair<FloatArray, Long>? {
+        val snap = ringBuffer.toArray().filterIsInstance<ImuSample>()
+        if (snap.size < WINDOW_SIZE) return null
+        val recent = snap.takeLast(WINDOW_SIZE)
+        val flat = FloatArray(CHANNEL_NUM * WINDOW_SIZE)
+        for ((t, s) in recent.withIndex()) {
+            flat[0 * WINDOW_SIZE + t] = s.linAcc[0]   // ch 0: linear acc x
+            flat[1 * WINDOW_SIZE + t] = s.linAcc[1]   // ch 1: linear acc y
+            flat[2 * WINDOW_SIZE + t] = s.linAcc[2]   // ch 2: linear acc z
+            flat[3 * WINDOW_SIZE + t] = s.gyr[0]      // ch 3: gyr x
+            flat[4 * WINDOW_SIZE + t] = s.gyr[1]      // ch 4: gyr y
+            flat[5 * WINDOW_SIZE + t] = s.gyr[2]      // ch 5: gyr z
+        }
+        return Pair(flat, recent.first().ts_us)
+    }
+
+    /** 가장 최근 샘플 (EKF 초기화, 타임스탬프 참조용) */
+    fun getLatestSample(): ImuSample? = _latestSample
+
+    /**
+     * TYPE_ROTATION_VECTOR 에서 추출한 최신 yaw (rad).
+     *
+     * EKF 와 동일한 공식: atan2(R[1,0], R[0,0])  (ZYX Euler, 수학 양방향 반시계 양수)
+     * rotVecSensor 가 없거나 아직 수신 전이면 Float.NaN 반환.
+     */
+    fun getLatestYawRad(): Float = latestYawRad
+
+    /**
+     * [P11] TYPE_ROTATION_VECTOR 지자기계 정확도 반환.
+     *
+     * 0=UNRELIABLE, 1=LOW, 2=MEDIUM, 3=HIGH.
+     * 초기값 0 — rotVecSensor 가 없거나 아직 onAccuracyChanged 수신 전.
+     * 게이팅 기준: 2(MEDIUM) 이상일 때만 yaw 보정을 허용.
+     */
+    fun getRotVecAccuracy(): Int = rotVecAccuracy
+}
