@@ -160,6 +160,17 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
          */
         private const val YAW_SIGMA_RAD = 10.0 / 180.0 * Math.PI
 
+        // ── [P10] 시작 워밍업 + 최초 이동 발산 방지 파라미터 ───────────
+        /**
+         * 시작 버튼 누른 후 궤적을 그리지 않는 워밍업 기간 (ms).
+         * EKF 는 즉시 실행(바이어스 수렴, 공분산 안정화, 클론 누적)하되
+         * 이 기간 동안은 trackPoints 에 점을 추가하지 않는다.
+         * → 최초 이동 발산이 화면에 표시되지 않음.
+         * → 이후 안정화된 상태에서 궤적 표시 시작.
+         * 3초: 클론 3개 누적 + 바이어스 초기 수렴 충분.
+         */
+        private const val WARMUP_DURATION_MS = 3_000L  // 3초
+
         // ── [P10] 최초 이동 발산 방지 파라미터 ─────────────────────────
         /**
          * 추론 윈도우의 동적 구간 최소 비율 (0.0~1.0).
@@ -204,6 +215,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     private var propJob:  Job? = null
     private val trackPoints      = mutableListOf<Pair<Double, Double>>()
     private val modelTrackPoints = mutableListOf<Pair<Double, Double>>()
+
+    /** [P10] 시작 버튼을 누른 시각 (System.currentTimeMillis). 워밍업 판정에 사용. */
+    private var startTimeMs: Long = 0L
 
     /** 모델 단독 누적 위치 (EKF 없이 displacement 합산) */
     private var modelPosX = 0.0
@@ -283,7 +297,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     // ── 측위 시작 ────────────────────────────────────────────────
     fun start() {
         if (_state.value.isRunning) return
-        Log.i(TAG, "측위 시작")
+        startTimeMs = System.currentTimeMillis()
+        Log.i(TAG, "측위 시작 (워밍업 ${WARMUP_DURATION_MS}ms 동안 궤적 표시 억제)")
 
         viewModelScope.launch(Dispatchers.IO) {
             // 모델 로드
@@ -670,8 +685,14 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // [아이디어 5] 다음 스텝의 모델 only 게이팅을 위해 현재 속도 크기 저장
         prevEkfVelNorm = sqrt(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2])
 
-        trackPoints.add(Pair(pos[0], pos[1]))
-        if (trackPoints.size > 5000) trackPoints.removeAt(0)
+        // [P10] 워밍업 기간 동안 궤적 표시 억제
+        // EKF 는 계속 실행(바이어스 수렴·공분산 안정화·클론 누적)하되
+        // 화면에는 WARMUP_DURATION_MS 이후부터 점을 찍기 시작.
+        val elapsedMs = System.currentTimeMillis() - startTimeMs
+        if (elapsedMs >= WARMUP_DURATION_MS) {
+            trackPoints.add(Pair(pos[0], pos[1]))
+            if (trackPoints.size > 5000) trackPoints.removeAt(0)
+        }
 
         _state.value = _state.value.copy(
             position          = Triple(pos[0], pos[1], pos[2]),
@@ -749,32 +770,3 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
      *
      * 최초 이동 시 윈도우는 정지/이동 혼합 → 네트워크 추론 오염 → 발산.
      * 이 값이 MIN_DYNAMIC_FRACTION 미만이면 추론을 건너뛰어 혼합 입력을 차단.
-     *
-     * @return 0.0(전부 정지) ~ 1.0(전부 이동)
-     */
-    private fun computeDynamicFraction(window: FloatArray): Float {
-        val N = ImuCollector.WINDOW_SIZE
-        var dynamicCount = 0
-        for (t in 0 until N) {
-            val gx = window[3 * N + t]
-            val gy = window[4 * N + t]
-            val gz = window[5 * N + t]
-            val mag = sqrt((gx * gx + gy * gy + gz * gz).toDouble()).toFloat()
-            if (mag >= STATIC_GYR_RMS_THRESHOLD) dynamicCount++
-        }
-        return dynamicCount.toFloat() / N
-    }
-
-    // ── 헬퍼: body frame → gravity-aligned world frame 좌표 변환 ──
-    /**
-     * Python imu_tracker.py 의 get_displacement_and_cov_from_network() 에 해당하는 변환.
-     *
-     * 알고리즘:
-     *  1. t_begin 의 EKF 회전 R_begin (world←body) 에서 yaw 를 제거 → R_yawfree
-     *  2. EKF 자이로 편향 bg 를 가져와 보정된 자이로로 상대 회전 Rs_bofbi[t] 적분
-     *     → Python scekf.py 의 (net_gyr[j] − bg) × dt 와 동일
-     *  3. Rs_net[t] = R_yawfree @ Rs_bofbi[t]
-     *  4. 각 샘플: linAcc_w = Rs_net[t] @ linAcc_body,  gyr_w = Rs_net[t] @ gyr_body
-     *
-     * @param window   FloatArray[6×100] channel-major, body frame (ch0-2: linAcc, ch3-5: gyr)
-     * @param R
