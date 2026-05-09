@@ -128,8 +128,12 @@ class TrackView @JvmOverloads constructor(
         val minX = allXs.min(); val maxX = allXs.max()
         val minY = allYs.min(); val maxY = allYs.max()
 
-        val rangeX = (maxX - minX).coerceAtLeast(0.5)
-        val rangeY = (maxY - minY).coerceAtLeast(0.5)
+        // 최소 표시 범위: 실내 공간 기준 10m × 10m
+        // → 작은 오차가 화면 전체를 차지하는 과도한 확대 방지
+        // 궤적이 10m 초과 시 자동 축소
+        val MIN_RANGE_M = 10.0
+        val rangeX = (maxX - minX).coerceAtLeast(MIN_RANGE_M)
+        val rangeY = (maxY - minY).coerceAtLeast(MIN_RANGE_M)
         val scaleX = (w - 2 * pad) / rangeX
         val scaleY = (h - 2 * pad) / rangeY
         val scale  = minOf(scaleX, scaleY)
