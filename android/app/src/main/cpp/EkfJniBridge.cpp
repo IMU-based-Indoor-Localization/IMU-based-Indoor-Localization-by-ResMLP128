@@ -279,6 +279,24 @@ Java_com_imulocal_EkfBridge_nativeFlushClones(
 }
 
 // ─────────────────────────────────────────────────────────────
+// [P9d] JNI: Thaw Static State (STATIC→MOVING 전환 시 공분산 해동)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * [P9d] STATIC 종료 시 한 번 호출.
+ * freeze_static_state() 로 1e-8 로 압축된 Σ[v,v], Σ[p,p] 를
+ * 합리적 불확실성(0.01 m²)으로 복원 → 칼만 게인 정상화.
+ */
+JNIEXPORT void JNICALL
+Java_com_imulocal_EkfBridge_nativeThawStaticState(
+        JNIEnv* /*env*/, jclass /*cls*/) {
+
+    std::lock_guard<std::mutex> lock(g_ekf_mutex);
+    if (g_ekf && g_ekf->is_initialized())
+        g_ekf->thaw_static_state();
+}
+
+// ─────────────────────────────────────────────────────────────
 // JNI: 클론 회전 행렬 반환 (좌표 변환용)
 // ─────────────────────────────────────────────────────────────
 
@@ -392,23 +410,4 @@ Java_com_imulocal_EkfBridge_nativeApplyPositionHold(
 // ─────────────────────────────────────────────────────────────
 
 /**
- * [P9] 정지 상태에서 매 IMU 프레임마다 호출.
- * EKF 칼만 업데이트를 완전히 우회하여 state_.p, state_.v 를 직접 고정하고
- * 공분산 v/p 블록을 압축(1e-8)한다.
- * apply_position_hold() + apply_zupt() 조합의 칼만 게인 부족 문제를 근본 해결.
- *
- * @param px, py, pz  정지 확정 시점에 기록한 앵커 위치 (월드 프레임, m)
- */
-JNIEXPORT void JNICALL
-Java_com_imulocal_EkfBridge_nativeFreezeStaticState(
-        JNIEnv* /*env*/, jclass /*cls*/,
-        jdouble px, jdouble py, jdouble pz) {
-
-    std::lock_guard<std::mutex> lock(g_ekf_mutex);
-    if (g_ekf && g_ekf->is_initialized()) {
-        imu_ekf::Vec3 anchor(px, py, pz);
-        g_ekf->freeze_static_state(anchor);
-    }
-}
-
-// ─────────────────────────────────────────────────────�
+ * [P9] 정지 

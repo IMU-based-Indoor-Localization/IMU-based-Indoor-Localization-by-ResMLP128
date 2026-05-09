@@ -115,10 +115,19 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
         /**
          * 1-초 윈도우당 최대 허용 변위 (m).
-         * 실내 최대 이동속도 ≈ 4-5 m/s → 1초 ≈ 5m.
-         * 6m 초과 시 좌표 변환 오류 또는 네트워크 이상 출력으로 판단 → 건너뜀.
+         * [P9d] 실내 일반 보행 최대속도 ≈ 2 m/s → 1초 ≈ 2m.
+         * 2m 초과 시 네트워크 이상 출력 또는 좌표 변환 오류로 판단 → 건너뜀.
+         * (기존 6.0m 는 너무 관대 — 잘못된 측정값이 EKF 를 발산시킴)
          */
-        private const val MAX_DISP_PER_WINDOW_M = 6.0
+        private const val MAX_DISP_PER_WINDOW_M = 2.0
+
+        /**
+         * [P9d] 측정 공분산 최솟값 (바닥 설정).
+         * 네트워크가 과도하게 자신감 있는 예측을 할 때 EKF 가 맹목적으로 따라가는 것을 방지.
+         * exp(-4) ≈ 0.018 m² → 0.1 m² (std = 0.316 m) 로 하향.
+         * K = 0.01/(0.01+0.1) ≈ 0.09 → 과도한 보정 억제.
+         */
+        private const val MIN_MEAS_COV = 0.05  // m² (std ≈ 0.224 m)
 
         // ── [아이디어 3] Hysteresis 상태 머신 파라미터 ────────────────
         /**
@@ -427,7 +436,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                         // → 새 클론 ~1초 누적 후 정상 재개
                         localCloneHistory.clear()
                         EkfBridge.flushClones()
-                        Log.d(TAG, "STATIC→MOVING: 클론 이중 플러시 (Kotlin+C++) — stale 발산 방지")
+                        EkfBridge.thawStaticState()
+                        Log.d(TAG, "STATIC→MOVING: 클론 이중 플러시+공분산 해동 — stale 발산 방지")
                         false   // 이번 프레임부터 추론 진행
                     } else {
                         // 아직 MOVING 미확정 → 정지로 유지
@@ -663,7 +673,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         val cov = DoubleArray(9) { 0.0 }
         for (i in 0 until 3) {
             val logVar = dispCov[i].toDouble().coerceAtLeast(-4.0)  // Python: clip < -4
-            cov[i * 3 + i] = exp(logVar).coerceAtMost(100.0)
+            // [P9d] 최솟값 MIN_MEAS_COV 로 바닥 설정:
+            // 네트워크가 과도하게 자신감 있을 때 EKF 가 잘못된 측정값을 맹목적으로 따라가는 것 방지
+            cov[i * 3 + i] = exp(logVar).coerceIn(MIN_MEAS_COV, 100.0)
         }
         return cov
     }
@@ -774,23 +786,4 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
      *   yaw_meas = yaw_rv_current − yaw_rv_at_init
      *            → EKF 월드 프레임 기준 상대 yaw (초기화 시 = 0)
      *
-     * 건너뛰는 경우:
-     *  - rotVecSensor 없음 (NaN)
-     *  - EKF 미초기화 (yawRvAtInit = NaN)
-     *  - 이노베이션 > 45° (C++ 내부에서 자동 거부)
-     *
-     * @param phase 로그용 태그 ("STATIC" / "MOVING")
-     */
-    private fun applyRotVecYaw(phase: String) {
-        if (yawRvAtInit.isNaN()) return
-        val yawRvCurrent = imuCollector.getLatestYawRad()
-        if (yawRvCurrent.isNaN()) return
-
-        // EKF 프레임 기준 yaw: 초기화 시점 오프셋 차감
-        var yawMeas = yawRvCurrent.toDouble() - yawRvAtInit
-        // [-π, π] 래핑
-        while (yawMeas >  Math.PI) yawMeas -= 2.0 * Math.PI
-        while (yawMeas < -Math.PI) yawMeas += 2.0 * Math.PI
-
-        EkfBridge.applyYawUpdate(yawMeas, YAW_SIGMA_RAD)
-        Log.v(TAG, "[$phase] Yaw 보정
+     * 건너뛰는 경�
