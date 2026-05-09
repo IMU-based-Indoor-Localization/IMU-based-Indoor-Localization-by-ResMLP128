@@ -147,6 +147,14 @@ object EkfBridge {
      */
     fun flushClones() = nativeFlushClones()
 
+    /**
+     * [P9d] Thaw Static State: STATIC→MOVING 전환 시 공분산 해동.
+     * freeze_static_state() 로 1e-8 로 압축된 Σ[v,v], Σ[p,p] 를
+     * 0.01 m² 로 복원 → 칼만 게인 K≈0.33 → 측정값 정상 반영.
+     * flushClones() 직후 호출.
+     */
+    fun thawStaticState() = nativeThawStaticState()
+
     fun isInitialized(): Boolean = nativeIsInitialized()
 
     /**
@@ -221,9 +229,4 @@ object EkfBridge {
     @JvmStatic external fun nativeGetPosition(): DoubleArray
     @JvmStatic external fun nativeGetVelocity(): DoubleArray
     @JvmStatic external fun nativeSetMeasCovScale(scale: Double)
-    @JvmStatic external fun nativeSetProcessNoise(sigmaNA: Double, sigmaNG: Double)
-    @JvmStatic external fun nativeMarginalize(cutIdx: Int)
-    @JvmStatic external fun nativeIsInitialized(): Boolean
-    @JvmStatic external fun nativeGetCloneRotation(tUs: Long): DoubleArray
-    @JvmStatic external fun nativeGetGyrBias(): DoubleArray
-    @JvmStatic external fun nativeApplyZupt(
+    @JvmStatic external fun nativeSetProces

@@ -287,6 +287,22 @@ public:
     void freeze_static_state(const Vec3& p_anchor);
 
     /**
+     * [P9d] Thaw Static State: STATIC→MOVING 전환 시 공분산 해동.
+     *
+     * freeze_static_state() 는 Σ[v,v], Σ[p,p] 를 1e-8 로 압축한다.
+     * 이 상태에서 MOVING 이 시작되면 propagation 으로 1초 후
+     *   Σ[p,p] ≈ σ_na²·T³/3 ≈ 3e-4 → 칼만 게인 K ≈ 0.016 (1.6%)
+     * → 측정값이 사실상 무시 → IMU 바이어스 적분 지배 → 발산.
+     *
+     * 이 함수는 STATIC 종료 시 한 번 호출하여 Σ[v,v], Σ[p,p] 를
+     * 합리적인 불확실성 값으로 복원한다.
+     *   Σ[v,v] = 0.01 m²/s²  (std = 0.1 m/s — 정지 후 속도 불확실성)
+     *   Σ[p,p] = 0.01 m²     (std = 0.1 m  — 정지 후 위치 불확실성)
+     * → K ≈ 0.01/(0.01+0.02) ≈ 0.33 → 33% 보정 → 측정값 반영 정상화
+     */
+    void thaw_static_state();
+
+    /**
      * Yaw 절대값 업데이트: Android TYPE_ROTATION_VECTOR 의 yaw 를 EKF 에 주입.
      *
      * 관측 모델: ψ_measured = ψ_current + δψ
@@ -304,28 +320,4 @@ public:
     // ── 상태 조회 ───────────────────────────────────────────
     bool        is_initialized()  const { return initialized_; }
     const FilterState& state()    const { return state_; }
-    const MatXX&       covariance() const { return Sigma_; }
-
-    /** 현재 위치 (월드 프레임) */
-    Vec3 position() const { return state_.p; }
-    /** 현재 속도 (월드 프레임) */
-    Vec3 velocity() const { return state_.v; }
-    /** 위치 표준편차 [σx, σy, σz] */
-    Vec3 position_std() const;
-
-private:
-    FilterConfig cfg_;
-    FilterState  state_;
-    MatXX        Sigma_;    ///< 전체 공분산 (15+6N × 15+6N)
-    Eigen::Matrix<double,6,6> W_;  ///< IMU 노이즈 공분산
-    MatXX        Q_;               ///< 프로세스 노이즈 (편향 랜덤워크)
-
-    bool   initialized_{false};
-    bool   first_update_{true};
-
-    void reset_covariance();
-    void build_noise_matrices();
-    void apply_correction(const VecX& delta_X);
-
-    /** 전체 공분산에서 15차원 오차 공분산 블록을 반환 */
-    Mat15 Sigma15() 
+    const MatXX&
