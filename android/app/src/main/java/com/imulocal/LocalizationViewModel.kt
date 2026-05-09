@@ -332,13 +332,31 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
                         if (!EkfBridge.isInitialized()) {
                             EkfBridge.initialize(tsUs, acc)
-                            // EKF 초기화 직후 Rotation Vector yaw 오프셋 기록
-                            val rvYaw = imuCollector.getLatestYawRad()
-                            if (!rvYaw.isNaN()) {
+                            // [P11] EKF 초기화 직후 Rotation Vector yaw 오프셋 기록.
+                            // 자기계 정확도가 MEDIUM(2) 이상일 때만 기록 — 낮으면 NaN 유지.
+                            // → 나중에 정확도가 올라가면 applyRotVecYaw 가 자동으로 주입 시작.
+                            // → 초기 잘못된 기준점으로 인한 yaw 오프셋 오류 방지.
+                            val rvYaw     = imuCollector.getLatestYawRad()
+                            val rvAccInit = imuCollector.getRotVecAccuracy()
+                            if (!rvYaw.isNaN() && rvAccInit >= 2) {
                                 yawRvAtInit = rvYaw.toDouble()
-                                Log.i(TAG, "Yaw 오프셋 초기화: ${"%.1f".format(Math.toDegrees(yawRvAtInit))}°")
+                                Log.i(TAG, "Yaw 오프셋 초기화: ${"%.1f".format(Math.toDegrees(yawRvAtInit))}° (정확도 $rvAccInit/3)")
+                            } else {
+                                Log.w(TAG, "Yaw 오프셋 초기화 보류: 자기계 정확도 부족 ($rvAccInit/3) — 정확도 회복 후 자동 설정")
                             }
                             continue
+                        }
+
+                        // [P11] yawRvAtInit 지연 초기화:
+                        // EKF 초기화 시 자기계 정확도가 낮아 오프셋이 NaN 인 경우,
+                        // 정확도가 MEDIUM 이상으로 오르면 그 시점에 오프셋을 기록.
+                        if (yawRvAtInit.isNaN()) {
+                            val rvYaw     = imuCollector.getLatestYawRad()
+                            val rvAccNow  = imuCollector.getRotVecAccuracy()
+                            if (!rvYaw.isNaN() && rvAccNow >= 2) {
+                                yawRvAtInit = rvYaw.toDouble()
+                                Log.i(TAG, "Yaw 오프셋 지연 초기화: ${"%.1f".format(Math.toDegrees(yawRvAtInit))}° (정확도 $rvAccNow/3)")
+                            }
                         }
 
                         // 클론 삽입 여부: inferJob 이 예약한 ts 이상이면 삽입
@@ -736,39 +754,4 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         for (i in 0 until 3) {
             val logVar = dispCov[i].toDouble().coerceAtLeast(-4.0)  // Python: clip < -4
             // [P9d] 최솟값 MIN_MEAS_COV 로 바닥 설정:
-            // 네트워크가 과도하게 자신감 있을 때 EKF 가 잘못된 측정값을 맹목적으로 따라가는 것 방지
-            cov[i * 3 + i] = exp(logVar).coerceIn(MIN_MEAS_COV, 100.0)
-        }
-        return cov
-    }
-
-    // ── 헬퍼: 자이로 RMS 계산 (정적 상태 판정용) ─────────────────
-    /**
-     * body frame window 에서 자이로(ch 3-5) 3축 합산 RMS 를 반환 (rad/s).
-     * 정지 판정에 사용: 이 값이 STATIC_GYR_RMS_THRESHOLD 미만이면 정적.
-     *
-     * 계산: sqrt( mean_over_t( gx²+gy²+gz² ) )
-     * = sqrt( (Σ(gx²+gy²+gz²)) / N )
-     */
-    private fun computeGyrRms(window: FloatArray): Float {
-        val N = ImuCollector.WINDOW_SIZE
-        var sumSq = 0f
-        for (t in 0 until N) {
-            val gx = window[3 * N + t]
-            val gy = window[4 * N + t]
-            val gz = window[5 * N + t]
-            sumSq += gx * gx + gy * gy + gz * gz
-        }
-        return sqrt(sumSq / N)
-    }
-
-    /**
-     * [P10] 추론 윈도우에서 동적 샘플(gyr > threshold)의 비율을 반환.
-     *
-     * 최초 이동 시 윈도우는 정지/이동 혼합 → 네트워크 추론 오염 → 발산.
-     * 이 값이 MIN_DYNAMIC_FRACTION 미만이면 추론을 건너뛰어 혼합 입력을 차단.
-     *
-     * @return 0.0(전부 정지) ~ 1.0(전부 이동)
-     */
-    private fun computeDynamicFraction(window: FloatArray): Float {
-        val N = ImuCollect
+            // 네�
