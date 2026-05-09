@@ -219,6 +219,9 @@ public:
     /** cut_idx 이전의 과거 상태를 주변화(marginalize)한다. */
     void marginalize(int cut_idx);
 
+    /** 현재 EKF 상태에 존재하는 클론(과거 상태 사본) 수를 반환. */
+    int clone_count() const { return state_.N(); }
+
     // ── 파라미터 동적 조정 ──────────────────────────────────
     /** 분류기 결과에 따라 meascov_scale 을 실시간으로 변경 */
     void set_meascov_scale(double scale) { cfg_.meascov_scale = scale; }
@@ -325,10 +328,4 @@ private:
     void apply_correction(const VecX& delta_X);
 
     /** 전체 공분산에서 15차원 오차 공분산 블록을 반환 */
-    Mat15 Sigma15() const {
-        int sz = static_cast<int>(Sigma_.rows());
-        return Sigma_.block<15,15>(sz-15, sz-15);
-    }
-};
-
-} // namespace imu_ekf
+    Mat15 Sigma15() 
