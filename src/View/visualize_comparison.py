@@ -65,6 +65,15 @@ STATE_EKF_PARAMS = {
     9:  dict(meascov_scale=0.1,    sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # large_scale
 }
 
+# ---------------------------------------------------------------------------
+# 네트워크 단독 Dead-reckoning 이 EKF 보다 RMSE 가 낮은 상태 ID 집합
+# ekf_tune.py 그리드 서치 결과 (2026-05-11) 기준:
+#   handbag(1) handheld(2) pocket(3) running(4) slow_walking(5)
+#   multi_devices(7) multi_users(8) large_scale(9)
+# trolley(6) 만 EKF 가 네트워크보다 우수 → 이 집합에서 제외
+# ---------------------------------------------------------------------------
+NETWORK_ONLY_STATES: set = {1, 2, 3, 4, 5, 7, 8, 9}
+
 
 # ---------------------------------------------------------------------------
 # 모델 로딩
@@ -349,7 +358,8 @@ class TwoLayerImuTracker:
                  use_soft_switching: bool = True,
                  cls_model=None,
                  cls_norm_mean: np.ndarray = None,
-                 cls_norm_std: np.ndarray = None):
+                 cls_norm_std: np.ndarray = None,
+                 network_only_states=None):
         if device is None:
             device = next(model.parameters()).device
 
@@ -375,6 +385,10 @@ class TwoLayerImuTracker:
         # Method-E: GT quaternion yaw 를 측정 프레임 정규화에 사용 (진단 전용)
         self.gt_quat   = gt_quat    # [T, 4] xyzw  None → EKF 추정 rotation 사용 (기본)
         self.gt_ts_us  = gt_ts_us   # [T]   타임스탬프 (μs)
+
+        # 네트워크 단독 모드: EKF update 건너뛰고 변위를 직접 누적하는 상태 집합
+        self.network_only_states = set(network_only_states) if network_only_states else set()
+        self._net_pos: np.ndarray = None   # 네트워크 단독 위치 누적기
 
         self.filter      = ImuMSCKF(filter_tuning_cfg)
         self.meas_source = TwoLayerMeasSource(model, norm_mean, norm_std, device,
@@ -439,6 +453,17 @@ class TwoLayerImuTracker:
             self.last_acc_before_next_interp_time = acc_raw
             self.last_gyr_before_next_interp_time = gyr_raw
 
+    def get_current_position(self) -> np.ndarray:
+        """현재 추정 위치 [3] 반환.
+
+        네트워크 단독 모드(state_id ∈ network_only_states)에서는 누적 네트워크
+        변위 예측값을, EKF 모드에서는 EKF 필터 상태 위치를 반환한다.
+        """
+        if self._net_pos is not None:
+            return self._net_pos.copy()
+        _, _, p, _, _ = self.filter.get_evolving_state()
+        return p.flatten().copy()
+
     def _get_imu_samples_for_network(self, t_begin_us, t_oldest_state_us, t_end_us):
         net_tus_begin = t_begin_us
         net_tus_end   = t_end_us - self.dt_interp_us
@@ -473,7 +498,7 @@ class TwoLayerImuTracker:
         Rs_net_wfb = np.einsum("ip,tpj->tij", R_bofboldstate, Rs_bofbi)
         net_acc_w  = np.einsum("tij,tj->ti", Rs_net_wfb, net_acc)
         net_gyr_w  = np.einsum("tij,tj->ti", Rs_net_wfb, net_gyr)
-        return net_gyr_w, net_acc_w
+        return net_gyr_w, net_acc_w, Ri_z
 
     def _process_update(self, t_us):
         if self.filter.state.N <= self.update_distance_num_clone:
@@ -490,7 +515,7 @@ class TwoLayerImuTracker:
         if self.debug_callback_get_meas:
             meas, meas_cov = self.debug_callback_get_meas(t_oldest, t_end_us)
         else:
-            net_gyr_w, net_acc_w = self._get_imu_samples_for_network(
+            net_gyr_w, net_acc_w, Ri_z = self._get_imu_samples_for_network(
                 t_begin_us, t_oldest, t_end_us
             )
             meas, meas_cov = self.meas_source.get_displacement_measurement(
@@ -507,7 +532,26 @@ class TwoLayerImuTracker:
             var_ba = ita_ba   ** 2;  var_bg = ita_bg   ** 2
             self.filter.W = np.diag([var_g, var_g, var_g, var_a, var_a, var_a])
             self.filter.Q = np.diag([var_bg, var_bg, var_bg, var_ba, var_ba, var_ba])
-            # ────────────────────────────────────────────────────────────
+            # ── 네트워크 단독 Dead-Reckoning 모드 ─────────────────────────────
+            # self.network_only_states 가 명시적으로 설정된 경우에만 활성화.
+            # (ekf_tune.py 그리드서치는 None → 항상 EKF 경로 유지)
+            # EKF propagation(filter.propagate)은 계속 돌려 orientation 을 유지하되,
+            # filter.update 를 건너뛰고 Ri_z @ meas 를 직접 누적한다.
+            if self.network_only_states and state_id in self.network_only_states:
+                if self._net_pos is None:
+                    # 최초 진입: 현재 EKF 위치에서 누적 시작
+                    _, _, p, _, _ = self.filter.get_evolving_state()
+                    self._net_pos = p.flatten().copy()
+                # yaw-정규화 프레임 변위 → world frame 변위 → 누적
+                self._net_pos = self._net_pos + (Ri_z @ meas).flatten()
+                self.has_done_first_update = True
+                oldest_idx = self.filter.state.si_timestamps_us.index(t_oldest)
+                self.filter.marginalize(oldest_idx)
+                self.imu_buffer.throw_data_before(t_begin_us)
+                return True
+            else:
+                # EKF 모드로 복귀(또는 유지): 누적기 초기화
+                self._net_pos = None
         self.filter.update(meas, meas_cov, t_oldest, t_end_us)
         self.has_done_first_update = True
 
@@ -560,7 +604,8 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
                        use_soft_switching: bool = True,
                        cls_model=None,
                        cls_norm_mean: np.ndarray = None,
-                       cls_norm_std: np.ndarray = None):
+                       cls_norm_std: np.ndarray = None,
+                       network_only_states=None):
     """ImuTracker 파이프라인으로 EKF 궤적을 반환.
     use_gt_meas=True     : 네트워크 대신 GT 변위를 측정값으로 사용 (디버그)
     use_gt_yaw_norm=True : 측정 프레임 yaw 정규화에 GT quat 사용 (Method-E 진단)
@@ -596,6 +641,7 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
         cls_model=cls_model,
         cls_norm_mean=cls_norm_mean,
         cls_norm_std=cls_norm_std,
+        network_only_states=network_only_states,
     )
 
     # GT 측정값 콜백 (디버그)
@@ -642,8 +688,7 @@ def run_ekf_imutracker(ts_us, gyr, acc_raw, quat, pos_gt, vel_gt,
         # ── GT yaw 주입 (방안 C): IMU 적분 yaw 오차를 GT 로 교정
         if gt_yaw_inject:
             _correct_yaw_to_gt(tracker.filter.state, ts_us, quat, i)
-        _, _, p_ekf, _, _ = tracker.filter.get_evolving_state()
-        ekf_positions.append(p_ekf.flatten().copy())
+        ekf_positions.append(tracker.get_current_position())
 
     return np.array(ekf_positions, dtype=np.float32)
 

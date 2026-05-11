@@ -250,7 +250,8 @@ def main():
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    results = []  # (cat, seq, split, best_scale, rmse_net, rmse_ekf, rmse_gtyaw, rmse_gtmeas, rmse_gtyawnorm, rmse_soft, grid_log)
+    results = []  # (cat, seq, split, best_scale, rmse_net, rmse_ekf, rmse_gtyaw, rmse_gtmeas, rmse_gtyawnorm, rmse_soft, use_ekf, grid_log)
+    network_only_sids_so_far: set = set()   # 누적 Network-only 상태 ID 집합
 
     for cat in CATEGORIES:
         npy_path, seq_name, split = find_sequence(cat)
@@ -369,6 +370,10 @@ def main():
 
         # ── Soft Switching EKF (out_regression + out_cls_oxford 별도 분류기) ──
         rmse_soft = float("nan")
+        # 현재 카테고리 use_ekf 계산 및 누적 network_only 집합 갱신
+        _use_ekf_cur = best_rmse < rmse_net
+        if not _use_ekf_cur:
+            network_only_sids_so_far.add(state_id)
         if cls_model is not None:
             try:
                 ekf_pos_soft = run_ekf_imutracker(
@@ -386,19 +391,20 @@ def main():
             except Exception as e:
                 print(f"  [!] Soft-Switch 실패: {e}")
 
+        use_ekf = best_rmse < rmse_net   # EKF RMSE 가 Network RMSE 보다 낮으면 EKF 사용
         results.append((cat, seq_name, split, best_scale,
-                        rmse_net, best_rmse, rmse_gt_yaw, rmse_gt_meas, rmse_gt_yaw_norm, rmse_soft, grid_log))
+                        rmse_net, best_rmse, rmse_gt_yaw, rmse_gt_meas, rmse_gt_yaw_norm, rmse_soft, use_ekf, grid_log))
         print()
 
     # ── 결과 요약 테이블 ─────────────────────────────────────────────
     print("\n" + "=" * 128)
     print(f"{'Category':<18} {'Split':<6} {'StateID':>7} {'Best Scale':>11} "
-          f"{'Net RMSE':>10} {'EKF RMSE':>10} {'Soft-EKF':>10} {'GT-Meas':>9} {'GT-YawNorm':>11}  {'Improve':>8}")
+          f"{'Net RMSE':>10} {'EKF RMSE':>10} {'Soft-EKF':>10} {'GT-Meas':>9} {'GT-YawNorm':>11}  {'Winner':>8}")
     print("-" * 128)
-    for cat, seq, split, scale, r_net, r_ekf, r_gtyaw, r_gtmeas, r_gtyawnorm, r_soft, _ in results:
+    for cat, seq, split, scale, r_net, r_ekf, r_gtyaw, r_gtmeas, r_gtyawnorm, r_soft, use_ekf, _ in results:
         sid  = CATEGORY_TO_STATE.get(cat, -1)
         diff = r_net - r_ekf          # positive = EKF better
-        mark = " [+]" if diff > 0 else " [-]"
+        mark = " [EKF+]" if use_ekf else " [NET+]"
         soft_str      = f"{r_soft:>10.4f}"      if not np.isnan(r_soft)      else f"{'N/A':>10}"
         gtmeas_str    = f"{r_gtmeas:>9.4f}"     if not np.isnan(r_gtmeas)    else f"{'N/A':>9}"
         gtyawnorm_str = f"{r_gtyawnorm:>11.4f}"  if not np.isnan(r_gtyawnorm) else f"{'N/A':>11}"
@@ -408,7 +414,7 @@ def main():
 
     # ── 업데이트된 STATE_EKF_PARAMS 코드 ────────────────────────────
     state_to_cat = {v: k for k, v in CATEGORY_TO_STATE.items()}
-    cat_to_scale = {cat: scale for cat, _, _, scale, _, _, _, _, _, _, _ in results}
+    cat_to_scale = {cat: scale for cat, _, _, scale, _, _, _, _, _, _, _, _ in results}
 
     labels = {
         -1: "unknown",      1: "handbag",   2: "handheld",
@@ -438,6 +444,26 @@ def main():
               f"sigma_na=None, sigma_ng=None, ita_ba=None, ita_bg=None),  # {label}")
     print("}")
     print("-" * 65)
+
+    # ── NETWORK_ONLY_STATES 출력 ────────────────────────────────────────────
+    network_only_cats = [
+        cat for cat, _, _, _, r_net, r_ekf, _, _, _, _, use_ekf, _
+        in results if not use_ekf
+    ]
+    network_only_sids = sorted(
+        {CATEGORY_TO_STATE[cat] for cat in network_only_cats if cat in CATEGORY_TO_STATE}
+    )
+
+    print("\n>> 아래 코드를 visualize_comparison.py 의 NETWORK_ONLY_STATES 에 붙여넣으세요:")
+    print("-" * 65)
+    if network_only_sids:
+        sid_list  = ", ".join(str(s) for s in network_only_sids)
+        cat_names = ", ".join(network_only_cats)
+        print(f"NETWORK_ONLY_STATES = {{{sid_list}}}  # {cat_names}")
+    else:
+        print("NETWORK_ONLY_STATES = set()  # 모든 카테고리에서 EKF 가 Network 보다 우수")
+    print("-" * 65)
+
     print(f"\n[완료] 저장 위치: {OUTPUT_DIR.resolve()}")
 
 
