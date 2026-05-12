@@ -31,6 +31,63 @@
             android:orientation="vertical"
             android:padding="12dp">
 
+            <!-- 캘리브레이션 안내 카드 (영점 보정 중에만 표시) -->
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/calibCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="10dp"
+                android:visibility="gone"
+                app:cardBackgroundColor="#FFF8E1"
+                app:cardElevation="2dp"
+                app:cardCornerRadius="8dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="12dp">
+
+                    <TextView
+                        android:id="@+id/tvCalibTitle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="센서 영점 보정 중"
+                        android:textSize="14sp"
+                        android:textStyle="bold"
+                        android:textColor="#E65100"/>
+
+                    <TextView
+                        android:id="@+id/tvCalibHint"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="캘리브레이션을 위해 2초간 기기를 가만히 두세요."
+                        android:textSize="13sp"
+                        android:textColor="#5D4037"/>
+
+                    <ProgressBar
+                        android:id="@+id/calibProgress"
+                        style="?android:attr/progressBarStyleHorizontal"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:max="100"
+                        android:progress="0"/>
+
+                    <TextView
+                        android:id="@+id/tvCalibPercent"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:gravity="end"
+                        android:text="0 %"
+                        android:textSize="12sp"
+                        android:textColor="#9E6B00"
+                        android:fontFamily="monospace"/>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
             <!-- 경로 뷰 (모델+EKF 파랑 / 모델only 주황 동시 표시) -->
             <com.imulocal.TrackView
                 android:id="@+id/trackView"

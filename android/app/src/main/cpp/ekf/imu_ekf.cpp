@@ -572,4 +572,48 @@ void ScEkf::apply_correction(const VecX& delta_X) {
     // 과거 상태 보정
     for (int i = 0; i < N; ++i) {
         Vec3 dtheta = delta_X.segment<3>(6*i);
-        Ve
+        Vec3 dp     = delta_X.segment<3>(6*i + 3);
+        state_.si_Rs[i] = mat_exp(dtheta) * state_.si_Rs[i];
+        state_.si_ps[i] = state_.si_ps[i] + dp;
+    }
+
+    // 현재 상태 보정
+    int base = 6 * N;
+    Vec3 dtheta = delta_X.segment<3>(base);
+    Vec3 dv     = delta_X.segment<3>(base + 3);
+    Vec3 dp_ev  = delta_X.segment<3>(base + 6);
+    Vec3 dbg    = delta_X.segment<3>(base + 9);
+    Vec3 dba    = delta_X.segment<3>(base + 12);
+
+    state_.R  = mat_exp(dtheta) * state_.R;
+    state_.v  = state_.v + dv;
+    state_.p  = state_.p + dp_ev;
+    state_.bg = state_.bg + dbg;
+    state_.ba = state_.ba + dba;
+}
+
+void ScEkf::marginalize(int cut_idx) {
+    int rm = cut_idx + 1;  // 제거할 과거 상태 수
+
+    state_.si_Rs.erase(state_.si_Rs.begin(), state_.si_Rs.begin() + rm);
+    state_.si_ps.erase(state_.si_ps.begin(), state_.si_ps.begin() + rm);
+    state_.si_timestamps_us.erase(
+        state_.si_timestamps_us.begin(),
+        state_.si_timestamps_us.begin() + rm);
+
+    // 공분산 블록 잘라내기
+    int cut_dim = 6 * rm;
+    int new_sz  = static_cast<int>(Sigma_.rows()) - cut_dim;
+    Sigma_  = Sigma_.block(cut_dim, cut_dim, new_sz, new_sz).eval();
+}
+
+Vec3 ScEkf::position_std() const {
+    int sz = static_cast<int>(Sigma_.rows());
+    Vec3 std_vec;
+    std_vec(0) = std::sqrt(Sigma_(sz-9, sz-9));
+    std_vec(1) = std::sqrt(Sigma_(sz-8, sz-8));
+    std_vec(2) = std::sqrt(Sigma_(sz-7, sz-7));
+    return std_vec;
+}
+
+} // namespace imu_ekf

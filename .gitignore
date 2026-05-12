@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────
+# Claude Code internal files
+# ─────────────────────────────────────────────
+.claude/
+
+# ─────────────────────────────────────────────
+# Python cache / 가상환경 / 임시 폴더
+# ─────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv_convert/
+.venv/
+venv/
+env/
+.pip_cache/
+.torch_extract/
+.tmp/
+*.egg-info/
+
+# ─────────────────────────────────────────────
+# Datasets  (너무 커서 git 관리 불가)
+# ─────────────────────────────────────────────
+# Oxford LLIO 데이터셋 (~906 MB)
+src/Network/oxford_split/
+
+# TLIO 원본 코드 + golden 데이터셋 (~8.2 GB)
+TLIO-master/
+
+# TLIO Oxford 데이터셋 (~2.1 GB)
+src/TLIO_Oxford_Dataset/
+
+# ─────────────────────────────────────────────
+# Model checkpoints / 학습 산출물
+# ─────────────────────────────────────────────
+# 모든 학습 출력 폴더 (재생성 가능)
+src/Network/out_regression/
+src/Network/out_resnet/
+src/Network/out_resnet_small/
+src/outputs/
+
+# epoch 스냅샷은 용량만 차지하므로 제외
+src/Network/out_*/checkpoints/epoch_*.pth
+
+# ─────────────────────────────────────────────
+# 로그 / 임시 산출물
+# ─────────────────────────────────────────────
+*.log
+logcat_*.txt
+logcat_*.log
+
+# ─────────────────────────────────────────────
+# IDE / OS
+# ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.iml
+*.DS_Store
+Thumbs.db
+desktop.ini

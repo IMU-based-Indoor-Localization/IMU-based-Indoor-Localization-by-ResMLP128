@@ -23,6 +23,16 @@ object EkfBridge {
 
     // ── 기본 EKF 파라미터 ──────────────────────────────────────
     // Python filter_batch.py / main_filter.py 기본값과 동일
+    //
+    // [P14 → P15 롤백 이력]
+    //   P14 에서 meascov_scale 기본값을 10.0 → 1.0 으로 낮추고
+    //   R_SCALE_PER_CLASS 를 Python ekf_tune.py grid-search 결과(0.001~1.0)와
+    //   동기화하였으나, 어플리케이션 환경에서 EKF 가 발산하여 궤적이
+    //   사라지는 부작용이 발생하였다. 원인은 Python grid-search 가 GT 자세를
+    //   사용한 환경에서 도출된 값이라 측정값이 거의 GT 수준 정확도인 반면,
+    //   어플리케이션은 EKF 자세 추정 오차로 인해 측정 좌표계가 학습 분포에서
+    //   어긋난다는 점이다. 작은 R_scale 이 부정확한 측정값을 K≈1 로 받아들여
+    //   양의 피드백 발산을 일으켰다. P15 에서 P13 이전 디자인으로 복원한다.
     private val DEFAULT_PARAMS = doubleArrayOf(
         sqrt(1e-3),              // [0]  sigma_na  — 가속도 노이즈 (m/s²)
         sqrt(1e-4),              // [1]  sigma_ng  — 자이로 노이즈 (rad/s)
@@ -35,7 +45,7 @@ object EkfBridge {
         0.0001,                  // [8]  init_bg_sigma (rad/s)
         0.02,                    // [9]  init_ba_sigma (m/s²)
         9.81,                    // [10] g_norm (m/s²)
-        10.0                     // [11] meascov_scale 기본값
+        10.0                     // [11] meascov_scale 기본값 — P15: 1.0 → 10.0 원복
     )
 
     // ── Context-Aware Adaptive EKF 파라미터 테이블 ────────────
@@ -49,6 +59,11 @@ object EkfBridge {
     //   Unknown    : Q↑ R↑↑  (분류 불가 → 보수적 처리)
     //
     // 인덱스: 0=handbag 1=handheld 2=pocket 3=running 4=slow_walk 5=trolley 6=unknown
+    //
+    // [P15] P14 의 Python 동기화 값(0.001~1.0)이 발산을 유발하여 P13 이전 값으로 원복.
+    //   Python grid-search 는 GT 자세 기반 환경에서 튜닝된 결과로 측정값이 거의
+    //   GT 수준 정확도임을 전제로 한다. 어플리케이션은 EKF 자세 추정 오차로 인해
+    //   측정 좌표계가 학습 분포에서 어긋나므로 더 큰 R 로 노이즈를 흡수해야 한다.
     //
     // R (meascov_scale): handheld=10.0 기준 ─────────────────────
     private val R_SCALE_PER_CLASS = doubleArrayOf(
@@ -66,6 +81,7 @@ object EkfBridge {
     private val SIGMA_NA_BASE = sqrt(1e-3)   // ≈ 0.031623 m/s²
     private val SIGMA_NG_BASE = sqrt(1e-4)   // ≈ 0.010000 rad/s (불변)
 
+    // [P15] P14 의 통일값(모두 SIGMA_NA_BASE)을 P13 이전의 클래스별 가중치로 원복.
     private val SIGMA_NA_PER_CLASS = doubleArrayOf(
         SIGMA_NA_BASE * 1.5,   // 0 handbag    — 중간↑ (×1.5)
         SIGMA_NA_BASE * 1.0,   // 1 handheld   — 기준
@@ -229,4 +245,15 @@ object EkfBridge {
     @JvmStatic external fun nativeGetPosition(): DoubleArray
     @JvmStatic external fun nativeGetVelocity(): DoubleArray
     @JvmStatic external fun nativeSetMeasCovScale(scale: Double)
-    @JvmStatic external fun nativeSetProces
+    @JvmStatic external fun nativeSetProcessNoise(sigmaNA: Double, sigmaNG: Double)
+    @JvmStatic external fun nativeMarginalize(cutIdx: Int)
+    @JvmStatic external fun nativeIsInitialized(): Boolean
+    @JvmStatic external fun nativeGetCloneRotation(tUs: Long): DoubleArray
+    @JvmStatic external fun nativeGetGyrBias(): DoubleArray
+    @JvmStatic external fun nativeApplyZupt(sigma: Double)
+    @JvmStatic external fun nativeApplyYawUpdate(yawMeas: Double, sigmaYaw: Double)
+    @JvmStatic external fun nativeApplyPositionHold(px: Double, py: Double, pz: Double, sigmaPos: Double)
+    @JvmStatic external fun nativeFreezeStaticState(px: Double, py: Double, pz: Double)
+    @JvmStatic external fun nativeFlushClones()
+    @JvmStatic external fun nativeThawStaticState()
+}
