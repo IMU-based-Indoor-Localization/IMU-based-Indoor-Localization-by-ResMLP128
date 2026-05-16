@@ -410,4 +410,46 @@ Java_com_imulocal_EkfBridge_nativeApplyPositionHold(
 // ─────────────────────────────────────────────────────────────
 
 /**
- * [P9] 정지 
+ * [P9] 정지 상태에서 매 IMU 프레임마다 호출.
+ * EKF 칼만 업데이트를 완전히 우회하여 state_.p, state_.v 를 직접 고정하고
+ * 공분산 v/p 블록을 압축(1e-8)한다.
+ * apply_position_hold() + apply_zupt() 조합의 칼만 게인 부족 문제를 근본 해결.
+ *
+ * @param px, py, pz  정지 확정 시점에 기록한 앵커 위치 (월드 프레임, m)
+ */
+JNIEXPORT void JNICALL
+Java_com_imulocal_EkfBridge_nativeFreezeStaticState(
+        JNIEnv* /*env*/, jclass /*cls*/,
+        jdouble px, jdouble py, jdouble pz) {
+
+    std::lock_guard<std::mutex> lock(g_ekf_mutex);
+    if (g_ekf && g_ekf->is_initialized()) {
+        imu_ekf::Vec3 anchor(px, py, pz);
+        g_ekf->freeze_static_state(anchor);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// JNI: Yaw 절대값 업데이트 (TYPE_ROTATION_VECTOR 기반)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Android TYPE_ROTATION_VECTOR 에서 추출한 yaw 를 EKF 에 주입.
+ *
+ * yaw_meas = atan2(R_rv[1,0], R_rv[0,0]) - yaw_rv_at_init
+ *   → EKF 월드 프레임 기준 상대 yaw (초기화 시점 = 0)
+ *
+ * @param yaw_meas  EKF 프레임 yaw 측정값 (rad)
+ * @param sigma_yaw 측정 노이즈 표준편차 (rad)
+ */
+JNIEXPORT void JNICALL
+Java_com_imulocal_EkfBridge_nativeApplyYawUpdate(
+        JNIEnv* /*env*/, jclass /*cls*/, jdouble yaw_meas, jdouble sigma_yaw) {
+
+    std::lock_guard<std::mutex> lock(g_ekf_mutex);
+    if (g_ekf && g_ekf->is_initialized())
+        g_ekf->apply_yaw_update(static_cast<double>(yaw_meas),
+                                static_cast<double>(sigma_yaw));
+}
+
+} // extern "C"
