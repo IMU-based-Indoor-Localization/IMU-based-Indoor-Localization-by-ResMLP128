@@ -44,6 +44,15 @@ class ImuCollector(context: Context) : SensorEventListener {
         const val WINDOW_SIZE = 100
         const val BUFFER_SIZE = WINDOW_SIZE * 2
         const val CHANNEL_NUM = 6
+
+        /**
+         * [P21-ish] 실시간 영점 보정 지속 시간 (ms).
+         * 시작 후 이 시간 동안 linAcc + gyr 평균을 bias 로 추정,
+         * 이후 모든 샘플에서 bias 차감 후 propagateQueue / ringBuffer 에 적재.
+         * 캘리브레이션 중에는 어떠한 샘플도 큐에 들어가지 않으므로
+         * EkfBridge 초기화도 자연스럽게 지연된다.
+         */
+        const val CALIBRATION_DURATION_MS: Long = 2_000L
     }
 
     /**
@@ -115,6 +124,21 @@ class ImuCollector(context: Context) : SensorEventListener {
     private val _windowReady = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
     val windowReady: SharedFlow<Unit> = _windowReady.asSharedFlow()
 
+    // ── [P21-ish] 실시간 영점 보정 상태 ──────────────────────────
+    // 시작 시 2 초간 linAcc + gyr 평균을 bias 로 추정.
+    // 이후 모든 sample 에 bias 차감을 적용해 큐에 적재한다.
+    // acc (중력 포함) 는 bias 추정 제외 — 정지 자세에 따라 다르며 EKF 가 자체 추정.
+    @Volatile private var calibrating: Boolean = false
+    @Volatile private var calibrationDone: Boolean = false
+    @Volatile private var calibProgress: Float = 0f
+    private var calibStartElapsedMs: Long = 0L
+    private var calibCount: Int = 0
+    private val calibLinAccSum: DoubleArray = DoubleArray(3)
+    private val calibGyrSum:    DoubleArray = DoubleArray(3)
+
+    private val linAccBias: FloatArray = FloatArray(3)
+    private val gyrBias:    FloatArray = FloatArray(3)
+
     // ── 시작 / 종료 ─────────────────────────────────────────────
     fun start() {
         lastSampleTs  = -1L
@@ -126,6 +150,20 @@ class ImuCollector(context: Context) : SensorEventListener {
         propagateQueue.clear()
         ringBuffer.clear()
         _latestSample = null
+
+        // ── [P21-ish] 캘리브레이션 시작 상태 ──────────────────────
+        calibrating         = true
+        calibrationDone     = false
+        calibProgress       = 0f
+        calibStartElapsedMs = 0L
+        calibCount          = 0
+        for (i in 0..2) {
+            calibLinAccSum[i] = 0.0
+            calibGyrSum[i]    = 0.0
+            linAccBias[i] = 0f
+            gyrBias[i]    = 0f
+        }
+        Log.i(TAG, "[P21] 영점 보정 ${CALIBRATION_DURATION_MS}ms 시작 — 기기 정지 유지 필요")
 
         sensorManager.registerListener(this, accelSensor,  SensorManager.SENSOR_DELAY_FASTEST)
         sensorManager.registerListener(this, gyroSensor,   SensorManager.SENSOR_DELAY_FASTEST)
@@ -148,6 +186,20 @@ class ImuCollector(context: Context) : SensorEventListener {
     fun stop() {
         sensorManager.unregisterListener(this)
         propagateQueue.clear()
+
+        // [P21-ish] 캘리브레이션 상태 리셋
+        calibrating         = false
+        calibrationDone     = false
+        calibProgress       = 0f
+        calibStartElapsedMs = 0L
+        calibCount          = 0
+        for (i in 0..2) {
+            calibLinAccSum[i] = 0.0
+            calibGyrSum[i]    = 0.0
+            linAccBias[i] = 0f
+            gyrBias[i]    = 0f
+        }
+
         Log.i(TAG, "IMU 수집 종료")
     }
 
@@ -189,16 +241,51 @@ class ImuCollector(context: Context) : SensorEventListener {
         // 가속도 + 자이로 모두 수신된 이후에만 샘플링
         if (latestAccTs < 0 || latestGyrTs < 0) return
 
+        // ── [P21-ish] 캘리브레이션 분기 ───────────────────────────
+        // 시작 후 CALIBRATION_DURATION_MS 동안 linAcc + gyr 평균을 누적해
+        // bias 를 추정. 이 기간에는 propagateQueue / ringBuffer 미적재
+        // → EkfBridge 초기화·추론 모두 자연스럽게 지연됨.
+        if (calibrating) {
+            if (calibStartElapsedMs == 0L) {
+                calibStartElapsedMs = android.os.SystemClock.elapsedRealtime()
+            }
+            calibLinAccSum[0] += latestLinAcc[0].toDouble()
+            calibLinAccSum[1] += latestLinAcc[1].toDouble()
+            calibLinAccSum[2] += latestLinAcc[2].toDouble()
+            calibGyrSum[0]    += latestGyr[0].toDouble()
+            calibGyrSum[1]    += latestGyr[1].toDouble()
+            calibGyrSum[2]    += latestGyr[2].toDouble()
+            calibCount++
+
+            val elapsed = android.os.SystemClock.elapsedRealtime() - calibStartElapsedMs
+            calibProgress = (elapsed.toFloat() / CALIBRATION_DURATION_MS.toFloat()).coerceIn(0f, 1f)
+
+            if (elapsed >= CALIBRATION_DURATION_MS) {
+                performWarmup()
+            }
+            return
+        }
+
         // 100Hz 리샘플링
         if (lastSampleTs < 0) lastSampleTs = tsUs
         if (tsUs - lastSampleTs < sampleIntervalUs) return
         lastSampleTs = tsUs
 
+        // [P21-ish] linAcc + gyr 에 bias 차감 적용. acc 는 그대로 유지 (EKF 자체 추정).
+        val linAccCorr = FloatArray(3)
+        linAccCorr[0] = latestLinAcc[0] - linAccBias[0]
+        linAccCorr[1] = latestLinAcc[1] - linAccBias[1]
+        linAccCorr[2] = latestLinAcc[2] - linAccBias[2]
+        val gyrCorr = FloatArray(3)
+        gyrCorr[0] = latestGyr[0] - gyrBias[0]
+        gyrCorr[1] = latestGyr[1] - gyrBias[1]
+        gyrCorr[2] = latestGyr[2] - gyrBias[2]
+
         val sample = ImuSample(
             ts_us  = tsUs,
             acc    = latestAcc.clone(),
-            gyr    = latestGyr.clone(),
-            linAcc = latestLinAcc.clone()
+            gyr    = gyrCorr,
+            linAcc = linAccCorr
         )
 
         // ① EKF 전파 큐 (500 개 초과 시 오래된 것 제거)
@@ -277,4 +364,53 @@ class ImuCollector(context: Context) : SensorEventListener {
      * 게이팅 기준: 2(MEDIUM) 이상일 때만 yaw 보정을 허용.
      */
     fun getRotVecAccuracy(): Int = rotVecAccuracy
+
+    // ──────────────────────────────────────────────────────────────
+    // [P21-ish] 실시간 영점 보정 공개 API
+    // ──────────────────────────────────────────────────────────────
+
+    /** 현재 캘리브레이션 진행 중인지 여부 */
+    fun isCalibrating(): Boolean = calibrating
+
+    /** 캘리브레이션 완료 여부 (한 번이라도 끝났는지) */
+    fun isCalibrationDone(): Boolean = calibrationDone
+
+    /** 캘리브레이션 진행률 (0.0 ~ 1.0). UI 게이팅용. */
+    fun getCalibrationProgress(): Float = calibProgress
+
+    /** 추정된 (linAccBias, gyrBias) 스냅샷 — 진단/로깅용 */
+    fun getBiasSnapshot(): Pair<FloatArray, FloatArray> =
+        Pair(linAccBias.copyOf(), gyrBias.copyOf())
+
+    /**
+     * 캘리브레이션 누적 종료 — 평균을 bias 로 확정하고
+     * calibrating=false / calibrationDone=true 로 상태 전환.
+     * 호출 직후 다음 sample 부터 정상 수집·bias 차감 적용 시작.
+     */
+    private fun performWarmup() {
+        if (calibCount <= 0) {
+            Log.w(TAG, "[P21] 캘리브레이션 누적 샘플 0 개 — bias 를 0 으로 유지")
+        } else {
+            val n = calibCount.toDouble()
+            linAccBias[0] = (calibLinAccSum[0] / n).toFloat()
+            linAccBias[1] = (calibLinAccSum[1] / n).toFloat()
+            linAccBias[2] = (calibLinAccSum[2] / n).toFloat()
+            gyrBias[0]    = (calibGyrSum[0]    / n).toFloat()
+            gyrBias[1]    = (calibGyrSum[1]    / n).toFloat()
+            gyrBias[2]    = (calibGyrSum[2]    / n).toFloat()
+
+            Log.i(TAG,
+                "[P21] 캘리브레이션 완료 (n=$calibCount, " +
+                "elapsed=${android.os.SystemClock.elapsedRealtime() - calibStartElapsedMs}ms)" +
+                "\n  linAccBias = [${"%.4f".format(linAccBias[0])}, ${"%.4f".format(linAccBias[1])}, ${"%.4f".format(linAccBias[2])}] m/s²" +
+                "\n  gyrBias    = [${"%.5f".format(gyrBias[0])}, ${"%.5f".format(gyrBias[1])}, ${"%.5f".format(gyrBias[2])}] rad/s"
+            )
+        }
+
+        calibrating     = false
+        calibrationDone = true
+        calibProgress   = 1f
+        // 캘리브레이션 종료 직후 첫 sample 이 곧바로 흐르도록 lastSampleTs 재초기화
+        lastSampleTs = -1L
+    }
 }
