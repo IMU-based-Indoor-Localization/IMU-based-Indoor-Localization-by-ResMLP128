@@ -58,7 +58,9 @@ class GpsTracker(context: Context) {
         val request = LocationRequest.Builder(
             Priority.PRIORITY_HIGH_ACCURACY,
             INTERVAL_MS
-        ).build()
+        )
+            .setMinUpdateDistanceMeters(1.5f)   // 1.5m 미만 이동 시 콜백 무시 → 실내 GPS 노이즈 억제
+            .build()
 
         callback = object : LocationCallback() {
             override fun onLocationResult(result: LocationResult) {

@@ -237,10 +237,14 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                             trackPoints   = llioSnap.map { Pair(it.latitude, it.longitude) }
                         )
                     } else {
+                        val gpsSnap = synchronized(gpsPoints) { gpsPoints.toList() }
                         _state.value = _state.value.copy(
                             calibrating   = curCalibrating,
                             calibProgress = curCalibProg,
-                            calibDone     = curCalibDone
+                            calibDone     = curCalibDone,
+                            gpsPath       = gpsSnap,
+                            currentGps    = gpsSnap.lastOrNull(),
+                            gpsReady      = gpsAnchored
                         )
                     }
                     delay(UI_INTERVAL_MS)
@@ -270,11 +274,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             Log.i(TAG, "GPS 앵커 확정: lat=$gpsAnchorLat lng=$gpsAnchorLng")
         }
 
-        // 현재 GPS 즉시 반영 (지도 중심 이동)
-        _state.value = _state.value.copy(
-            currentGps = latLng,
-            gpsReady   = gpsAnchored
-        )
+        // currentGps / gpsReady 는 uiJob 100ms 루프에서 일괄 반영
+        // (여기서 별도 State 발행 시 collectLatest 가 100ms 루프를 취소하므로 제거)
     }
 
     // ── stop ─────────────────────────────────────────────────────

@@ -50,6 +50,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     /** GPS 첫 수신 시 카메라를 한 번만 이동 */
     private var cameraMovedOnce = false
 
+    /** 폴리라인 불필요 갱신 방지 — 마지막으로 그린 경로 크기 캐시 */
+    private var lastGpsSize  = 0
+    private var lastImuSize  = 0
+    private var lastLlioSize = 0
+
     // ── 위치 권한 런처 ────────────────────────────────────────────
     private val locationPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -86,6 +91,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         binding.btnReset.setOnClickListener {
             viewModel.reset()
             cameraMovedOnce = false
+            lastGpsSize  = 0
+            lastImuSize  = 0
+            lastLlioSize = 0
             clearPolylines()
         }
 
@@ -157,17 +165,21 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private fun updatePolylines(s: LocalizationViewModel.LocalizationState) {
         val map = naverMap ?: return
 
-        if (s.gpsPath.size >= 2) {
+        // 경로 크기가 바뀐 경우에만 coords 재할당 — 매 100ms 불필요한 GL 업데이트 방지
+        if (s.gpsPath.size >= 2 && s.gpsPath.size != lastGpsSize) {
             gpsPolyline.map    = map
             gpsPolyline.coords = s.gpsPath
+            lastGpsSize        = s.gpsPath.size
         }
-        if (s.imuOnlyPath.size >= 2) {
+        if (s.imuOnlyPath.size >= 2 && s.imuOnlyPath.size != lastImuSize) {
             imuPolyline.map    = map
             imuPolyline.coords = s.imuOnlyPath
+            lastImuSize        = s.imuOnlyPath.size
         }
-        if (s.llioPath.size >= 2) {
+        if (s.llioPath.size >= 2 && s.llioPath.size != lastLlioSize) {
             llioPolyline.map    = map
             llioPolyline.coords = s.llioPath
+            lastLlioSize        = s.llioPath.size
         }
 
         // GPS 첫 수신 시 카메라 한 번 이동
