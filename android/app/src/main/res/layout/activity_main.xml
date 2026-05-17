@@ -1,29 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.coordinatorlayout.widget.CoordinatorLayout
+<!--
+  activity_main.xml (P23)
+  ========================
+  레이아웃 구성:
+    - 네이버 지도 (MapFragment) : 전체 화면
+    - 캘리브레이션 카드          : 상단 오버레이 (보정 중에만 표시)
+    - 범례 카드                  : 우상단 오버레이
+    - 정보 + 버튼 카드           : 하단 오버레이 (반투명)
+-->
+<FrameLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    android:background="#FAFAFA">
+    android:layout_height="match_parent">
 
-    <!-- 툴바 -->
-    <com.google.android.material.appbar.AppBarLayout
+    <!-- ── 전체 화면 네이버 지도 ──────────────────────────────── -->
+    <fragment
+        android:id="@+id/map"
+        android:name="com.naver.maps.map.MapFragment"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
-        <androidx.appcompat.widget.Toolbar
-            android:id="@+id/toolbar"
-            android:layout_width="match_parent"
-            android:layout_height="?attr/actionBarSize"
-            android:background="?attr/colorPrimary"
-            app:title="IMU 실내 측위"
-            app:titleTextColor="#FFFFFF"/>
-    </com.google.android.material.appbar.AppBarLayout>
+        android:layout_height="match_parent" />
 
-    <!-- 콘텐츠 -->
-    <androidx.core.widget.NestedScrollView
+    <!-- ── 상단 오버레이: 캘리브레이션 카드 ─────────────────── -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/calibCard"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        app:layout_behavior="@string/appbar_scrolling_view_behavior">
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:layout_margin="12dp"
+        android:visibility="gone"
+        app:cardBackgroundColor="#FFF8E1"
+        app:cardElevation="4dp"
+        app:cardCornerRadius="8dp">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -31,162 +39,176 @@
             android:orientation="vertical"
             android:padding="12dp">
 
-            <!-- 캘리브레이션 안내 카드 (영점 보정 중에만 표시) -->
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/calibCard"
+            <TextView
+                android:id="@+id/tvCalibTitle"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="10dp"
-                android:visibility="gone"
-                app:cardBackgroundColor="#FFF8E1"
-                app:cardElevation="2dp"
-                app:cardCornerRadius="8dp">
+                android:text="센서 영점 보정 중"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:textColor="#E65100"/>
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="12dp">
-
-                    <TextView
-                        android:id="@+id/tvCalibTitle"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="센서 영점 보정 중"
-                        android:textSize="14sp"
-                        android:textStyle="bold"
-                        android:textColor="#E65100"/>
-
-                    <TextView
-                        android:id="@+id/tvCalibHint"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:text="캘리브레이션을 위해 2초간 기기를 가만히 두세요."
-                        android:textSize="13sp"
-                        android:textColor="#5D4037"/>
-
-                    <ProgressBar
-                        android:id="@+id/calibProgress"
-                        style="?android:attr/progressBarStyleHorizontal"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:max="100"
-                        android:progress="0"/>
-
-                    <TextView
-                        android:id="@+id/tvCalibPercent"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:gravity="end"
-                        android:text="0 %"
-                        android:textSize="12sp"
-                        android:textColor="#9E6B00"
-                        android:fontFamily="monospace"/>
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- 경로 뷰 (모델+EKF 파랑 / 모델only 주황 동시 표시) -->
-            <com.imulocal.TrackView
-                android:id="@+id/trackView"
-                android:layout_width="match_parent"
-                android:layout_height="360dp"
-                android:background="#FFFFFF"
-                android:elevation="2dp"/>
-
-            <!-- 상태 정보 카드 -->
-            <com.google.android.material.card.MaterialCardView
+            <TextView
+                android:id="@+id/tvCalibHint"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                app:cardElevation="2dp"
-                app:cardCornerRadius="8dp">
+                android:layout_marginTop="4dp"
+                android:text="2초간 기기를 가만히 두세요."
+                android:textSize="13sp"
+                android:textColor="#5D4037"/>
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="12dp">
+            <ProgressBar
+                android:id="@+id/calibProgress"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:max="100"
+                android:progress="0"/>
 
-                    <TextView android:id="@+id/tvPosition"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="[EKF] x=0.000  y=0.000  z=0.000 m"
-                        android:textSize="14sp"
-                        android:textColor="#1565C0"
-                        android:fontFamily="monospace"/>
+            <TextView
+                android:id="@+id/tvCalibPercent"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:gravity="end"
+                android:text="0 %"
+                android:textSize="12sp"
+                android:textColor="#9E6B00"
+                android:fontFamily="monospace"/>
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
 
-                    <TextView android:id="@+id/tvStd"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="σ  x=0.0000  y=0.0000  z=0.0000 m"
-                        android:textSize="13sp"
-                        android:textColor="#757575"
-                        android:fontFamily="monospace"
-                        android:layout_marginTop="4dp"/>
+    <!-- ── 우상단 오버레이: 경로 범례 ──────────────────────── -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/legendCard"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="12dp"
+        app:cardBackgroundColor="#E0FFFFFF"
+        app:cardElevation="4dp"
+        app:cardCornerRadius="8dp">
 
-                    <TextView android:id="@+id/tvVelocity"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="속도  |v|=0.00 m/s"
-                        android:textSize="13sp"
-                        android:layout_marginTop="4dp"/>
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="10dp">
 
-                    <TextView android:id="@+id/tvCarryMode"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="휴대 방식: unknown (0%)"
-                        android:textSize="13sp"
-                        android:layout_marginTop="4dp"/>
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <View android:layout_width="24dp" android:layout_height="4dp"
+                    android:background="#1565C0"/>
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp" android:text="GPS"
+                    android:textSize="12sp" android:textColor="#212121"/>
+            </LinearLayout>
 
-                    <TextView android:id="@+id/tvLatency"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="추론 지연: 0 ms"
-                        android:textSize="12sp"
-                        android:textColor="#9E9E9E"
-                        android:layout_marginTop="4dp"/>
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="6dp">
+                <View android:layout_width="24dp" android:layout_height="4dp"
+                    android:background="#E65100"/>
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp" android:text="IMU only"
+                    android:textSize="12sp" android:textColor="#212121"/>
+            </LinearLayout>
 
-            <!-- 제어 버튼 -->
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="6dp">
+                <View android:layout_width="24dp" android:layout_height="4dp"
+                    android:background="#2E7D32"/>
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:layout_marginStart="6dp" android:text="LLIO (EKF)"
+                    android:textSize="12sp" android:textColor="#212121"/>
+            </LinearLayout>
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- ── 하단 오버레이: 상태 정보 + 버튼 ─────────────────── -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/infoCard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_margin="12dp"
+        app:cardBackgroundColor="#E8FFFFFF"
+        app:cardElevation="6dp"
+        app:cardCornerRadius="12dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="12dp">
+
+            <TextView android:id="@+id/tvPosition"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="[EKF] x=0.000  y=0.000  z=0.000 m"
+                android:textSize="13sp" android:textColor="#1565C0"
+                android:fontFamily="monospace"/>
+
+            <TextView android:id="@+id/tvStd"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="σ  x=0.0000  y=0.0000  z=0.0000 m"
+                android:textSize="12sp" android:textColor="#757575"
+                android:fontFamily="monospace" android:layout_marginTop="2dp"/>
+
+            <TextView android:id="@+id/tvVelocity"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="속도  |v|=0.00 m/s"
+                android:textSize="12sp" android:layout_marginTop="2dp"/>
+
+            <TextView android:id="@+id/tvCarryMode"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="휴대 방식: unknown (0%)"
+                android:textSize="12sp" android:layout_marginTop="2dp"/>
+
+            <TextView android:id="@+id/tvLatency"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:text="추론 지연: 0 ms"
+                android:textSize="11sp" android:textColor="#9E9E9E"
+                android:layout_marginTop="2dp"/>
+
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:layout_marginTop="12dp"
+                android:layout_marginTop="10dp"
                 android:gravity="center_horizontal">
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnStart"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="시작"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:text="시작"
                     android:layout_marginEnd="6dp"/>
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnStop"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="정지"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:text="정지"
                     android:enabled="false"
                     style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                     android:layout_marginEnd="6dp"/>
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnReset"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="초기화"
+                    android:layout_width="0dp" android:layout_height="wrap_content"
+                    android:layout_weight="1" android:text="초기화"
                     style="@style/Widget.MaterialComponents.Button.TextButton"/>
             </LinearLayout>
-
         </LinearLayout>
-    </androidx.core.widget.NestedScrollView>
+    </com.google.android.material.card.MaterialCardView>
 
-</androidx.coordinatorlayout.widget.CoordinatorLayout>
+</FrameLayout>

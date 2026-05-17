@@ -97,6 +97,12 @@ dependencies {
     // PyTorch Mobile Lite (추론 엔진)
     implementation 'org.pytorch:pytorch_android_lite:2.1.0'
 
+    // 네이버 지도 SDK
+    implementation 'com.naver.maps:map-sdk:3.18.0'
+
+    // GPS (FusedLocationProviderClient)
+    implementation 'com.google.android.gms:play-services-location:21.2.0'
+
     // 코루틴
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 

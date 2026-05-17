@@ -1,6 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 인터넷 (네이버 지도 타일 로드) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- GPS 위치 권한 -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
     <!-- 외부 저장소 쓰기 (경로 CSV 내보내기) -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28"/>
@@ -20,6 +27,11 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.ImuLocal">
+
+        <!-- 네이버 지도 Client ID — API 키 발급 후 YOUR_NAVER_CLIENT_ID 를 실제 값으로 교체 -->
+        <meta-data
+            android:name="com.naver.maps.map.CLIENT_ID"
+            android:value="YOUR_NAVER_CLIENT_ID" />
 
         <activity
             android:name=".MainActivity"
