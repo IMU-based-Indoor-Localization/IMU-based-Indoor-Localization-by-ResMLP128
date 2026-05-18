@@ -1,4 +1,4 @@
-package com.imulocal
+﻿package com.imulocal
 
 import android.app.Application
 import android.util.Log
@@ -24,177 +24,227 @@ import kotlin.math.sqrt
 /**
  * LocalizationViewModel.kt
  * ========================
- * 앱의 핵심 측위 파이프라인.
+ * ?깆쓽 ?듭떖 痢≪쐞 ?뚯씠?꾨씪??
  *
- *  1. ImuCollector  → 100Hz IMU 수집
- *  2. InferenceEngine → 20Hz 네트워크 추론 (변위 + 분류)
- *  3. EkfBridge (JNI) → SC-EKF 상태 갱신
- *  4. UI 스레드로 위치/경로 방출
+ *  1. ImuCollector  ??100Hz IMU ?섏쭛
+ *  2. InferenceEngine ??20Hz ?ㅽ듃?뚰겕 異붾줎 (蹂??+ 遺꾨쪟)
+ *  3. EkfBridge (JNI) ??SC-EKF ?곹깭 媛깆떊
+ *  4. UI ?ㅻ젅?쒕줈 ?꾩튂/寃쎈줈 諛⑹텧
  *
- * ── 버그 수정 사항 ─────────────────────────────────────────
- *  ① 타임스탬프: System.currentTimeMillis() 완전 제거.
- *    모든 클론/갱신 타임스탬프는 SensorEvent.timestamp(부팅 경과 ns→μs) 사용.
+ * ?? 踰꾧렇 ?섏젙 ?ы빆 ?????????????????????????????????????????
+ *  ????꾩뒪?ы봽: System.currentTimeMillis() ?꾩쟾 ?쒓굅.
+ *    紐⑤뱺 ?대줎/媛깆떊 ??꾩뒪?ы봽??SensorEvent.timestamp(遺??寃쎄낵 ns?믊펣) ?ъ슜.
  *
- *  ② 샘플 스킵: windowReady.collect + getLatestSample() 방식 → 폐기.
- *    propJob 은 drainPropagateQueue() 로 5ms 마다 모든 100Hz 샘플 처리.
+ *  ???섑뵆 ?ㅽ궢: windowReady.collect + getLatestSample() 諛⑹떇 ???먭린.
+ *    propJob ? drainPropagateQueue() 濡?5ms 留덈떎 紐⑤뱺 100Hz ?섑뵆 泥섎━.
  *
- *  ③ 추론 타이밍: delay(50ms) 고정 → 경과 시간 보정 방식으로 교체.
- *    루프 시작시각 기록 후 runInferStep() 완료 뒤 나머지 시간만 대기.
+ *  ??異붾줎 ??대컢: delay(50ms) 怨좎젙 ??寃쎄낵 ?쒓컙 蹂댁젙 諛⑹떇?쇰줈 援먯껜.
+ *    猷⑦봽 ?쒖옉?쒓컖 湲곕줉 ??runInferStep() ?꾨즺 ???섎㉧吏 ?쒓컙留??湲?
  *
- *  ④ 클론 쌍: SC-EKF update() 는 t_begin, t_end 양쪽 모두
- *    si_timestamps_us 에 존재해야 함 → 매 추론마다 t_end 클론 삽입,
- *    cloneChannel 에서 ~1초 이전 클론을 t_begin 으로 탐색.
+ *  ???대줎 ?? SC-EKF update() ??t_begin, t_end ?묒そ 紐⑤몢
+ *    si_timestamps_us ??議댁옱?댁빞 ????留?異붾줎留덈떎 t_end ?대줎 ?쎌엯,
+ *    cloneChannel ?먯꽌 ~1珥??댁쟾 ?대줎??t_begin ?쇰줈 ?먯깋.
  *
- * ── P3/P4 수정 ─────────────────────────────────────────────
- *  P3: cloneHistory(ArrayDeque + synchronized) → Channel<Long>.
- *      propJob 이 Channel 에 send, inferJob 이 로컬 history 에 drain.
- *      두 코루틴이 공유 뮤텍스 없이 통신 → 락 경쟁 완전 제거.
- *  P4: CLONE_SETTLE_MS 20ms → 30ms (기기 부하 시 타이밍 여유 증가).
+ * ?? P3/P4 ?섏젙 ?????????????????????????????????????????????
+ *  P3: cloneHistory(ArrayDeque + synchronized) ??Channel<Long>.
+ *      propJob ??Channel ??send, inferJob ??濡쒖뺄 history ??drain.
+ *      ??肄붾（?댁씠 怨듭쑀 裕ㅽ뀓???놁씠 ?듭떊 ????寃쎌웳 ?꾩쟾 ?쒓굅.
+ *  P4: CLONE_SETTLE_MS 20ms ??30ms (湲곌린 遺??????대컢 ?ъ쑀 利앷?).
  *
- * ── P1 수정 ────────────────────────────────────────────────
- *  transformWindowToWorldFrame() 에서 자이로 적분 시
- *  EKF bg 편향을 차감하여 Python scekf.py 동작과 일치.
+ * ?? P1 ?섏젙 ????????????????????????????????????????????????
+ *  transformWindowToWorldFrame() ?먯꽌 ?먯씠濡??곷텇 ??
+ *  EKF bg ?명뼢??李④컧?섏뿬 Python scekf.py ?숈옉怨??쇱튂.
  *
- * ── P5 수정 (정지 노이즈 / 이동→정지 프리즈) ─────────────────
- *  원인: pendingCloneTs.set() 이 정지 판정보다 먼저 실행되어
- *        정지 중에도 클론이 C++ EKF 에 20Hz 로 삽입되지만
- *        marginalize() 는 호출되지 않음 → 클론 무한 누적.
- *        누적된 클론이 propagate() 의 O(N²) 행렬 연산을 폭증시켜
- *        Default 디스패처 스레드 포화 → 앱 프리즈 유발.
- *  수정:
- *    ① runInferStep 에서 정지 판정을 pendingCloneTs.set() 보다 앞으로 이동.
- *    ② STATIC 브랜치: pendingCloneTs = -1L 로 신규 클론 차단.
- *    ③ STATIC 브랜치: Channel 잔여 클론 drain 후 C++ 클론 전부 주변화.
- *       → 정지 상태에서 EKF 상태 벡터를 최소 크기로 유지.
+ * ?? P5 ?섏젙 (?뺤? ?몄씠利?/ ?대룞?믪젙吏 ?꾨━利? ?????????????????
+ *  ?먯씤: pendingCloneTs.set() ???뺤? ?먯젙蹂대떎 癒쇱? ?ㅽ뻾?섏뼱
+ *        ?뺤? 以묒뿉???대줎??C++ EKF ??20Hz 濡??쎌엯?섏?留?
+ *        marginalize() ???몄텧?섏? ?딆쓬 ???대줎 臾댄븳 ?꾩쟻.
+ *        ?꾩쟻???대줎??propagate() ??O(N짼) ?됰젹 ?곗궛????쬆?쒖폒
+ *        Default ?붿뒪?⑥쿂 ?ㅻ젅???ы솕 ?????꾨━利??좊컻.
+ *  ?섏젙:
+ *    ??runInferStep ?먯꽌 ?뺤? ?먯젙??pendingCloneTs.set() 蹂대떎 ?욎쑝濡??대룞.
+ *    ??STATIC 釉뚮옖移? pendingCloneTs = -1L 濡??좉퇋 ?대줎 李⑤떒.
+ *    ??STATIC 釉뚮옖移? Channel ?붿뿬 ?대줎 drain ??C++ ?대줎 ?꾨? 二쇰???
+ *       ???뺤? ?곹깭?먯꽌 EKF ?곹깭 踰≫꽣瑜?理쒖냼 ?ш린濡??좎?.
  *
- * ── P6 수정 (코루틴 yield 보장) ──────────────────────────────
- *  원인: inferJob 루프에서 elapsedMs ≥ INFER_INTERVAL_MS 이면
- *        delay() 를 호출하지 않아 Default 스레드를 양보하지 않음.
- *  수정: delay(remaining.coerceAtLeast(1L)) 로 항상 최소 1ms yield.
+ * ?? P6 ?섏젙 (肄붾（??yield 蹂댁옣) ??????????????????????????????
+ *  ?먯씤: inferJob 猷⑦봽?먯꽌 elapsedMs ??INFER_INTERVAL_MS ?대㈃
+ *        delay() 瑜??몄텧?섏? ?딆븘 Default ?ㅻ젅?쒕? ?묐낫?섏? ?딆쓬.
+ *  ?섏젙: delay(remaining.coerceAtLeast(1L)) 濡???긽 理쒖냼 1ms yield.
  */
 class LocalizationViewModel(application: Application) : AndroidViewModel(application) {
 
     companion object {
         private const val TAG = "LocalizationVM"
 
-        /** 추론 루프 목표 주기: 20Hz */
+        /** 異붾줎 猷⑦봽 紐⑺몴 二쇨린: 20Hz */
         private const val INFER_INTERVAL_MS  = 50L
 
-        /** 클론 삽입 대기 시간 (propJob 처리 여유 확보).
-         *  P4 수정: 20ms → 30ms (기기 부하 시 미삽입 빈도 감소) */
-        private const val CLONE_SETTLE_MS    = 30L
+        /** ?대줎 ?쎌엯 ?湲??쒓컙 (propJob 泥섎━ ?ъ쑀 ?뺣낫).
+         *  P4 ?섏젙: 20ms ??30ms (湲곌린 遺????誘몄궫??鍮덈룄 媛먯냼) */
+        private const val CLONE_SETTLE_MS    = 100L  // [DEBUG-1] 30 -> 100ms (clone ts mismatch fix)
 
-        /** propJob 드레인 폴링 주기 */
+        /** propJob ?쒕젅???대쭅 二쇨린 */
         private const val PROP_POLL_MS       = 5L
 
         /**
-         * 네트워크 윈도우 지속 시간 (μs).
-         * 100샘플 × 10,000μs/샘플 = 1,000,000μs 이지만
-         * getWindow() 는 first.ts 를 반환하므로
-         * last.ts − first.ts ≈ 99 × 10,000 = 990,000μs.
+         * ?ㅽ듃?뚰겕 ?덈룄??吏???쒓컙 (關s).
+         * 100?섑뵆 횞 10,000關s/?섑뵆 = 1,000,000關s ?댁?留?
+         * getWindow() ??first.ts 瑜?諛섑솚?섎?濡?
+         * last.ts ??first.ts ??99 횞 10,000 = 990,000關s.
          */
         private const val WINDOW_DURATION_US = 990_000L
 
-        /** cloneChannel 버퍼 크기 (약 2초분 × 20Hz = 40개) */
+        /** cloneChannel 踰꾪띁 ?ш린 (??2珥덈텇 횞 20Hz = 40媛? */
         private const val MAX_CLONE_HISTORY  = 40
 
-        /** t_begin 탐색 허용 오차 ±200ms */
-        private const val CLONE_MATCH_TOL_US = 200_000L
+        /** t_begin ?먯깋 ?덉슜 ?ㅼ감 짹200ms */
+        private const val CLONE_MATCH_TOL_US = 200_000L  // [DEBUG-2] 1s -> 200ms 환원 (게이팅 추가로 누적 처리)
+
+        /** [DEBUG-2] inferJob update 게이팅 — history span 이 이 시간 이상일 때만 update.
+         *  의도: 1초 윈도우 학습 모델과 매칭. 짧은 윈도우 update 시 모델 출력 비현실적 → EKF 발산. */
+        private const val MIN_HISTORY_SPAN_US = 800_000L  // 0.8초
 
         /**
-         * 정적 상태 판정 임계값.
-         * body frame 자이로 3축 RMS 가 이 값 미만이면 정지로 판단 → EKF 업데이트 건너뜀.
-         * 정지 MEMS 자이로 노이즈 ≈ 0.003-0.01 rad/s RMS.
-         * 보행 자이로 ≈ 0.1-0.5 rad/s RMS.
-         * [P9 조정] 0.03 → 0.08 rad/s:
-         * 실기기/에뮬레이터 MEMS 자이로 정지 노이즈가 0.03을 초과하는 경우가 많음.
-         * STATIC 앵커 로그가 전혀 찍히지 않을 경우(정지 미감지) 이 값을 올린다.
-         * 0.08 rad/s ≈ 4.6°/s — 느린 걷기(보통 0.15+ rad/s)와 충분히 구분됨.
+         * ?뺤쟻 ?곹깭 ?먯젙 ?꾧퀎媛?
+         * body frame ?먯씠濡?3異?RMS 媛 ??媛?誘몃쭔?대㈃ ?뺤?濡??먮떒 ??EKF ?낅뜲?댄듃 嫄대꼫?.
+         * ?뺤? MEMS ?먯씠濡??몄씠利???0.003-0.01 rad/s RMS.
+         * 蹂댄뻾 ?먯씠濡???0.1-0.5 rad/s RMS.
+         * [P9 議곗젙] 0.03 ??0.08 rad/s:
+         * ?ㅺ린湲??먮??덉씠??MEMS ?먯씠濡??뺤? ?몄씠利덇? 0.03??珥덇낵?섎뒗 寃쎌슦媛 留롮쓬.
+         * STATIC ?듭빱 濡쒓렇媛 ?꾪? 李랁엳吏 ?딆쓣 寃쎌슦(?뺤? 誘멸컧吏) ??媛믪쓣 ?щ┛??
+         * 0.08 rad/s ??4.6째/s ???먮┛ 嫄룰린(蹂댄넻 0.15+ rad/s)? 異⑸텇??援щ텇??
          */
         private const val STATIC_GYR_RMS_THRESHOLD = 0.08f  // rad/s
 
         /**
-         * 1-초 윈도우당 최대 허용 변위 (m).
-         * [P9d] 실내 일반 보행 최대속도 ≈ 2 m/s → 1초 ≈ 2m.
-         * 2m 초과 시 네트워크 이상 출력 또는 좌표 변환 오류로 판단 → 건너뜀.
-         * (기존 6.0m 는 너무 관대 — 잘못된 측정값이 EKF 를 발산시킴)
+         * 1-珥??덈룄?곕떦 理쒕? ?덉슜 蹂??(m).
+         * [P9d] ?ㅻ궡 ?쇰컲 蹂댄뻾 理쒕??띾룄 ??2 m/s ??1珥???2m.
+         * 2m 珥덇낵 ???ㅽ듃?뚰겕 ?댁긽 異쒕젰 ?먮뒗 醫뚰몴 蹂???ㅻ쪟濡??먮떒 ??嫄대꼫?.
+         * (湲곗〈 6.0m ???덈Т 愿? ???섎せ??痢≪젙媛믪씠 EKF 瑜?諛쒖궛?쒗궡)
          */
         private const val MAX_DISP_PER_WINDOW_M = 2.0
 
         /**
-         * [P9d] 측정 공분산 최솟값 (바닥 설정).
-         * 네트워크가 과도하게 자신감 있는 예측을 할 때 EKF 가 맹목적으로 따라가는 것을 방지.
-         * exp(-4) ≈ 0.018 m² → 0.1 m² (std = 0.316 m) 로 하향.
-         * K = 0.01/(0.01+0.1) ≈ 0.09 → 과도한 보정 억제.
+         * [P9d] 痢≪젙 怨듬텇??理쒖넖媛?(諛붾떏 ?ㅼ젙).
+         * ?ㅽ듃?뚰겕媛 怨쇰룄?섍쾶 ?먯떊媛??덈뒗 ?덉륫??????EKF 媛 留밸ぉ?곸쑝濡??곕씪媛??寃껋쓣 諛⑹?.
+         * exp(-4) ??0.018 m짼 ??0.1 m짼 (std = 0.316 m) 濡??섑뼢.
+         * K = 0.01/(0.01+0.1) ??0.09 ??怨쇰룄??蹂댁젙 ?듭젣.
          */
-        private const val MIN_MEAS_COV = 0.05  // m² (std ≈ 0.224 m)
+        private const val MIN_MEAS_COV = 0.05  // m짼 (std ??0.224 m)
 
-        // ── [아이디어 3] Hysteresis 상태 머신 파라미터 ────────────────
+        // ?? [?꾩씠?붿뼱 3] Hysteresis ?곹깭 癒몄떊 ?뚮씪誘명꽣 ????????????????
         /**
-         * MOVING → STATIC 전환에 필요한 연속 정지 프레임 수.
-         * 5프레임 × 50ms = 250ms 연속 정지해야 STATIC 으로 확정.
-         * 값을 높이면 이동→정지 반응이 느려지지만 오판정 감소.
+         * MOVING ??STATIC ?꾪솚???꾩슂???곗냽 ?뺤? ?꾨젅????
+         * 5?꾨젅??횞 50ms = 250ms ?곗냽 ?뺤??댁빞 STATIC ?쇰줈 ?뺤젙.
+         * 媛믪쓣 ?믪씠硫??대룞?믪젙吏 諛섏쓳???먮젮吏吏留??ㅽ뙋??媛먯냼.
          */
         private const val STATIC_CONFIRM_FRAMES = 5
 
         /**
-         * STATIC → MOVING 전환에 필요한 연속 이동 프레임 수.
-         * 3프레임 × 50ms = 150ms 연속 이동해야 MOVING 으로 확정.
-         * 값을 낮추면 보행 시작 반응이 빨라지지만 오판정 가능성 증가.
+         * STATIC ??MOVING ?꾪솚???꾩슂???곗냽 ?대룞 ?꾨젅????
+         * 3?꾨젅??횞 50ms = 150ms ?곗냽 ?대룞?댁빞 MOVING ?쇰줈 ?뺤젙.
+         * 媛믪쓣 ??텛硫?蹂댄뻾 ?쒖옉 諛섏쓳??鍮⑤씪吏吏留??ㅽ뙋??媛?μ꽦 利앷?.
          */
         private const val MOVING_CONFIRM_FRAMES = 3
 
-        // ── [아이디어 5] EKF 속도 게이트 ─────────────────────────────
+        // ?? [?꾩씠?붿뼱 5] EKF ?띾룄 寃뚯씠???????????????????????????????
         /**
-         * 모델 only 궤적 누적을 허용하는 최소 EKF 속도 (m/s).
-         * EKF 갱신 후 속도가 이 값 미만이면 dead-reckoning 을 차단.
-         * 5 cm/s: MEMS 정지 드리프트(≈1-3 cm/s) 의 약 2-3배 → 안전 여유.
+         * 紐⑤뜽 only 沅ㅼ쟻 ?꾩쟻???덉슜?섎뒗 理쒖냼 EKF ?띾룄 (m/s).
+         * EKF 媛깆떊 ???띾룄媛 ??媛?誘몃쭔?대㈃ dead-reckoning ??李⑤떒.
+         * 5 cm/s: MEMS ?뺤? ?쒕━?꾪듃(??-3 cm/s) ????2-3諛????덉쟾 ?ъ쑀.
          */
         private const val MODEL_VELOCITY_GATE = 0.05  // m/s
 
-        // ── Yaw drift 보정 파라미터 ──────────────────────────────────
+        // ?? Yaw drift 蹂댁젙 ?뚮씪誘명꽣 ??????????????????????????????????
         /**
-         * TYPE_ROTATION_VECTOR yaw 측정 노이즈 표준편차 (rad).
-         * 실내 자기 간섭 환경을 고려하여 10° (0.1745 rad) 로 보수적으로 설정.
-         * 지자기 노이즈가 적은 환경이면 5° 로 줄여도 무방.
+         * TYPE_ROTATION_VECTOR yaw 痢≪젙 ?몄씠利??쒖??몄감 (rad).
+         * ?ㅻ궡 ?먭린 媛꾩꽠 ?섍꼍??怨좊젮?섏뿬 10째 (0.1745 rad) 濡?蹂댁닔?곸쑝濡??ㅼ젙.
+         * 吏?먭린 ?몄씠利덇? ?곸? ?섍꼍?대㈃ 5째 濡?以꾩뿬??臾대갑.
          */
         private const val YAW_SIGMA_RAD = 10.0 / 180.0 * Math.PI
 
-        // ── [P10] 시작 워밍업 + 최초 이동 발산 방지 파라미터 ───────────
+        // ?? [P10] ?쒖옉 ?뚮컢??+ 理쒖큹 ?대룞 諛쒖궛 諛⑹? ?뚮씪誘명꽣 ???????????
         /**
-         * 시작 버튼 누른 후 궤적을 그리지 않는 워밍업 기간 (ms).
-         * EKF 는 즉시 실행(바이어스 수렴, 공분산 안정화, 클론 누적)하되
-         * 이 기간 동안은 trackPoints 에 점을 추가하지 않는다.
-         * → 최초 이동 발산이 화면에 표시되지 않음.
-         * → 이후 안정화된 상태에서 궤적 표시 시작.
-         * 3초: 클론 3개 누적 + 바이어스 초기 수렴 충분.
+         * ?쒖옉 踰꾪듉 ?꾨Ⅸ ??沅ㅼ쟻??洹몃━吏 ?딅뒗 ?뚮컢??湲곌컙 (ms).
+         * EKF ??利됱떆 ?ㅽ뻾(諛붿씠?댁뒪 ?섎졃, 怨듬텇???덉젙?? ?대줎 ?꾩쟻)?섎릺
+         * ??湲곌컙 ?숈븞? trackPoints ???먯쓣 異붽??섏? ?딅뒗??
+         * ??理쒖큹 ?대룞 諛쒖궛???붾㈃???쒖떆?섏? ?딆쓬.
+         * ???댄썑 ?덉젙?붾맂 ?곹깭?먯꽌 沅ㅼ쟻 ?쒖떆 ?쒖옉.
+         * 3珥? ?대줎 3媛??꾩쟻 + 諛붿씠?댁뒪 珥덇린 ?섎졃 異⑸텇.
          */
-        private const val WARMUP_DURATION_MS = 3_000L  // 3초
+        private const val WARMUP_DURATION_MS = 3_000L  // 3珥?
 
-        // ── [P10] 최초 이동 발산 방지 파라미터 ─────────────────────────
+        // ?? [P10] 理쒖큹 ?대룞 諛쒖궛 諛⑹? ?뚮씪誘명꽣 ?????????????????????????
         /**
-         * 추론 윈도우의 동적 구간 최소 비율 (0.0~1.0).
-         * WINDOW_SIZE=100 샘플(1초) 중 이 비율 이상이 gyr > threshold 여야 추론 실행.
+         * 異붾줎 ?덈룄?곗쓽 ?숈쟻 援ш컙 理쒖냼 鍮꾩쑉 (0.0~1.0).
+         * WINDOW_SIZE=100 ?섑뵆(1珥? 以???鍮꾩쑉 ?댁긽??gyr > threshold ?ъ빞 異붾줎 ?ㅽ뻾.
          *
-         * 최초 이동 시 윈도우는 [정지 85%][이동 15%] 혼합 → 네트워크 출력 오염.
-         * 0.5(50%) 요구 → 이동 시작 후 ~0.5초 후부터 추론 허용.
-         * cloneHistory 요구(~1초)와 맞물려 혼합 윈도우 업데이트를 실질적으로 차단.
+         * 理쒖큹 ?대룞 ???덈룄?곕뒗 [?뺤? 85%][?대룞 15%] ?쇳빀 ???ㅽ듃?뚰겕 異쒕젰 ?ㅼ뿼.
+         * 0.5(50%) ?붽뎄 ???대룞 ?쒖옉 ??~0.5珥??꾨???異붾줎 ?덉슜.
+         * cloneHistory ?붽뎄(~1珥?? 留욌Ъ???쇳빀 ?덈룄???낅뜲?댄듃瑜??ㅼ쭏?곸쑝濡?李⑤떒.
          */
         private const val MIN_DYNAMIC_FRACTION = 0.5f
 
         /**
-         * EKF 업데이트 후 속도 크기 상한 (m/s).
-         * 실내 최고 보행속도 ≈ 3 m/s. 초과 시 EKF 발산으로 판단 → ZUPT 강제 적용.
-         * 발산 감지 후 안전망(reactive divergence recovery).
+         * EKF ?낅뜲?댄듃 ???띾룄 ?ш린 ?곹븳 (m/s).
+         * ?ㅻ궡 理쒓퀬 蹂댄뻾?띾룄 ??3 m/s. 珥덇낵 ??EKF 諛쒖궛?쇰줈 ?먮떒 ??ZUPT 媛뺤젣 ?곸슜.
+         * 諛쒖궛 媛먯? ???덉쟾留?reactive divergence recovery).
          */
+        // [DEBUG-4 revert] 5.0 → 3.0 복원.
+        //   이유: 임계 5.0 시 ZUPT 가 거의 발동 안 함 → 잘못된 측정값 (unknown 클래스 OOD)
+        //        도 그대로 따라감 → 분류 안정성/제자리 회전 인식 저하 + dispLocal 변동 큼.
+        //   3.0 임계의 ZUPT 진동 (cycle) 은 trade-off 로 수용 — 분류 안정성 + 추적 의미성 우선.
+        //   본질적 해결은 IMU CSV 추출 + OxIOD 비교 후 보정 (다음 세션 plan).
         private const val MAX_POST_UPDATE_SPEED = 3.0  // m/s
+
+        // [P41 Dead-Reckoning Bypass] Python 원본 (Notion 2026-05-11) 핵심 통찰:
+        //   ekf_tune.py 그리드서치 결과 — trolley 외 모든 클래스에서 Network-only RMSE <<
+        //   EKF RMSE. trolley (state 6) 만 EKF 사용. 나머지는 EKF.update 우회 + dispLocal
+        //   을 begin yaw 만큼 회전해 _net_pos 에 직접 누적.
+        //
+        //   롤백 방법: 아래 USE_DEAD_RECKONING_BYPASS = false 로 변경 → 기존 코드 그대로.
+        //
+        //   클래스 매핑 (model_meta.json 기준):
+        //     0 unknown, 1 handbag, 2 handheld, 3 pocket, 4 running, 5 slow_walk, 6 trolley
+        //
+        //   [P41 ROLLBACK] bypass01 측정에서 trackPoints 발산 → 즉시 롤백.
+        //   원인 가설: Bypass 로 EKF.update 우회 후 (a) yaw 추정 정확도 저하 + (b) dispLocal
+        //   방향 편향 (-y 일관) 이 EKF cross-coupling 없이 그대로 누적 → 한 방향 큰 흐름.
+        //   다음 시도 전 Python 원본 _net_pos 누적 방식의 추가 후처리 (윈도우 평균, 방향
+        //   필터 등) 검토 필요.
+        private const val USE_DEAD_RECKONING_BYPASS = false
+        private val NETWORK_ONLY_CLASSES = setOf(0, 1, 2, 3, 4, 5)   // 6 (trolley) 만 EKF
+
+        // [P41 R_all[t] Frame] Python `_get_imu_samples_for_network` 와 동일 처리.
+        //   매 시점 자이로 적분 (EKF s_bg 차감) 으로 Rs_bofbi[t] 계산 → 시점별 R[t] 적용.
+        //   현재 transformWindowToWorldFrame 의 R_begin 1개 사용 (모든 시점에 같은 회전)
+        //   는 윈도우 내 자세 변화를 무시해 OOD 야기. 학습 코드 _window_to_gravity_aligned
+        //   도 매 시점 quat 적용 — 동일하게 맞춤.
+        //
+        //   롤백: 아래 false 로 → 기존 R_begin 1개 방식.
+        //
+        //   [P41 v2] 1차 시도에서 trackPoints 발산 → 원인 분석 후 재구현:
+        //     - raw gyr (P21 bias 차감 후, LPF 미적용) 사용  ← getRawGyrWindow()
+        //     - EKF s_bg 추가 차감 안 함 (이중 차감 회피)
+        //     - 적분 dt = 0.01s (100Hz 리샘플 후)
+        //   롤백: false 로 → 기존 R_begin 1개 방식
+        //
+        //   [현재 상태] dispCov 형식 수정 (#C) 이 더 안전 + 효과 큼 → 그것부터 우선.
+        //   R_all[t] v2 는 dispCov 검증 후 별도 시도.
+        //
+        //   [P41 v2 ACTIVATE] dispCov 수정 성공 (5m 왕복 → 1.8m 오차, 모델 RMSE 수준)
+        //   확인 후 frame mismatch 해소 시도 — 국소 지그재그 (누적/직선 10.6×) 완화 목표.
+        //   raw gyr (getRawGyrWindow) 사용 + EKF s_bg 차감 안 함 (v1 발산 회피).
+        //   효과 없거나 발산 시 즉시 false 로 1줄 롤백.
+        private const val USE_R_ALL_T_FRAME = true
     }
 
-    // ── 의존 컴포넌트 ────────────────────────────────────────────
+    // ?? ?섏〈 而댄룷?뚰듃 ????????????????????????????????????????????
     val imuCollector = ImuCollector(application)
     val inferEngine  = InferenceEngine(application)
 
-    // ── UI 상태 ──────────────────────────────────────────────────
+    // ?? UI ?곹깭 ??????????????????????????????????????????????????
     data class LocalizationState(
         val isRunning:         Boolean = false,
         val position:          Triple<Double, Double, Double> = Triple(0.0, 0.0, 0.0),
@@ -202,118 +252,143 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         val velocity:          Triple<Double, Double, Double> = Triple(0.0, 0.0, 0.0),
         val carryMode:         String  = "unknown",
         val carryProb:         Float   = 0f,
-        val trackPoints:       List<Pair<Double, Double>> = emptyList(),  // EKF 궤적
-        val modelTrackPoints:  List<Pair<Double, Double>> = emptyList(),  // 모델 only 궤적
-        val inferLatency:      Long    = 0L
+        val trackPoints:       List<Pair<Double, Double>> = emptyList(),  // EKF 沅ㅼ쟻
+        val modelTrackPoints:  List<Pair<Double, Double>> = emptyList(),  // 紐⑤뜽 only 沅ㅼ쟻
+        val inferLatency:      Long    = 0L,
+        // [P21-ish] 罹섎━釉뚮젅?댁뀡 UI ?쇰뱶諛???MainActivity ??calibCard ?쒖떆 ?쒖뼱
+        val calibrating:       Boolean = false,
+        val calibProgress:     Float   = 0f
     )
 
     private val _state = MutableStateFlow(LocalizationState())
     val state: StateFlow<LocalizationState> = _state
 
-    // ── 내부 상태 ────────────────────────────────────────────────
+    // ?? ?대? ?곹깭 ????????????????????????????????????????????????
     private var inferJob: Job? = null
     private var propJob:  Job? = null
     private val trackPoints      = mutableListOf<Pair<Double, Double>>()
     private val modelTrackPoints = mutableListOf<Pair<Double, Double>>()
 
-    /** [P10] 시작 버튼을 누른 시각 (System.currentTimeMillis). 워밍업 판정에 사용. */
+    /** [P10] ?쒖옉 踰꾪듉???꾨Ⅸ ?쒓컖 (System.currentTimeMillis). ?뚮컢???먯젙???ъ슜. */
     private var startTimeMs: Long = 0L
 
-    /** 모델 단독 누적 위치 (EKF 없이 displacement 합산) */
+    /** 紐⑤뜽 ?⑤룆 ?꾩쟻 ?꾩튂 (EKF ?놁씠 displacement ?⑹궛) */
     private var modelPosX = 0.0
     private var modelPosY = 0.0
 
-    // ── [아이디어 3] Hysteresis 상태 머신 ────────────────────────────
+    // [P41 Dead-Reckoning Bypass] Network-only 모드 (trolley 외) 의 누적 위치.
+    // EKF 모드 진입 시 EKF.p 로 동기화, NetOnly 모드 진입 시 누적 시작.
+    private var netPosX = 0.0
+    private var netPosY = 0.0
+    /** 직전 추론에서 EKF 모드였는지 — 모드 전환 시 _net_pos 재동기화용. */
+    private var prevUsedEkfUpdate = true
+
+    // ?? [?꾩씠?붿뼱 3] Hysteresis ?곹깭 癒몄떊 ????????????????????????????
     private enum class MotionState { STATIC, MOVING }
 
-    /** 확정된 현재 운동 상태. 초기값 STATIC (시작 시 정지 가정). */
+    /** ?뺤젙???꾩옱 ?대룞 ?곹깭. 珥덇린媛?STATIC (?쒖옉 ???뺤? 媛??. */
     private var motionState = MotionState.STATIC
 
-    /** MOVING 상태에서 연속으로 gyrRms < threshold 인 프레임 수 (→ STATIC 전환 카운터). */
+    /** MOVING ?곹깭?먯꽌 ?곗냽?쇰줈 gyrRms < threshold ???꾨젅????(??STATIC ?꾪솚 移댁슫??. */
     private var staticCandidateCount  = 0
 
-    /** STATIC 상태에서 연속으로 gyrRms ≥ threshold 인 프레임 수 (→ MOVING 전환 카운터). */
+    /** STATIC ?곹깭?먯꽌 ?곗냽?쇰줈 gyrRms ??threshold ???꾨젅????(??MOVING ?꾪솚 移댁슫??. */
     private var movingCandidateCount  = 0
 
     /**
-     * [P9] Hard State Freeze 앵커 위치.
-     * STATIC 첫 프레임에 EKF 위치를 기록, 이후 STATIC 기간 내내
-     * freezeStaticState(앵커)를 호출하여 EKF 상태를 직접 고정.
-     * MOVING 프레임 또는 reset() 시 null 로 초기화.
+     * [P9] Hard State Freeze ?듭빱 ?꾩튂.
+     * STATIC 泥??꾨젅?꾩뿉 EKF ?꾩튂瑜?湲곕줉, ?댄썑 STATIC 湲곌컙 ?대궡
+     * freezeStaticState(?듭빱)瑜??몄텧?섏뿬 EKF ?곹깭瑜?吏곸젒 怨좎젙.
+     * MOVING ?꾨젅???먮뒗 reset() ??null 濡?珥덇린??
      */
     private var staticAnchorPos: DoubleArray? = null
 
-    // ── [아이디어 5] 직전 EKF 갱신 후 속도 크기 (m/s) ───────────────
-    /** EKF update() 직후 조회한 속도 노름 — 다음 스텝 모델 only 게이팅에 사용. */
+    // ?? [?꾩씠?붿뼱 5] 吏곸쟾 EKF 媛깆떊 ???띾룄 ?ш린 (m/s) ???????????????
+    /** EKF update() 吏곹썑 議고쉶???띾룄 ?몃쫫 ???ㅼ쓬 ?ㅽ뀦 紐⑤뜽 only 寃뚯씠?낆뿉 ?ъ슜. */
     private var prevEkfVelNorm = 0.0
 
-    // ── 원점 복귀 자동 경로 클리어 ────────────────────────────────
-    /** 출발 후 이 거리(m) 이상 멀어진 적이 있어야 복귀 감지를 활성화. */
+    // ?? ?먯젏 蹂듦? ?먮룞 寃쎈줈 ?대━??????????????????????????????????
+    /** 異쒕컻 ????嫄곕━(m) ?댁긽 硫?댁쭊 ?곸씠 ?덉뼱??蹂듦? 媛먯?瑜??쒖꽦?? */
     private val AWAY_THRESHOLD_M   = 1.5
-    /** 원점으로부터 이 거리(m) 이내로 들어오면 경로 클리어. */
+    /** ?먯젏?쇰줈遺????嫄곕━(m) ?대궡濡??ㅼ뼱?ㅻ㈃ 寃쎈줈 ?대━?? */
     private val RETURN_PROXIMITY_M = 0.5
-    /** 출발 후 AWAY_THRESHOLD_M 이상 멀어진 적이 있는지 여부. */
+    /** 異쒕컻 ??AWAY_THRESHOLD_M ?댁긽 硫?댁쭊 ?곸씠 ?덈뒗吏 ?щ?. */
     private var wasAwayFromOrigin  = false
 
-    // ── Yaw drift 보정 ────────────────────────────────────────────
+    // ?? Yaw drift 蹂댁젙 ????????????????????????????????????????????
     /**
-     * EKF 초기화 시점의 TYPE_ROTATION_VECTOR yaw (rad).
-     * Double.NaN = 미초기화 또는 rotVecSensor 없음.
+     * EKF 珥덇린???쒖젏??TYPE_ROTATION_VECTOR yaw (rad).
+     * Double.NaN = 誘몄큹湲고솕 ?먮뒗 rotVecSensor ?놁쓬.
      *
-     * 보정 공식:  yaw_meas = yaw_rv_current − yaw_rv_at_init
-     *   → EKF 월드 프레임 기준 상대 yaw (초기화 시점 기준 0)
+     * 蹂댁젙 怨듭떇:  yaw_meas = yaw_rv_current ??yaw_rv_at_init
+     *   ??EKF ?붾뱶 ?꾨젅??湲곗? ?곷? yaw (珥덇린???쒖젏 湲곗? 0)
      */
     private var yawRvAtInit = Double.NaN
 
     /**
-     * inferJob → propJob 단방향 신호:
-     *  inferJob 이 원하는 끝 클론 센서 타임스탬프를 기록.
-     *  propJob 이 해당 ts 이상의 샘플 처리 시 클론 삽입 후 -1 로 리셋.
+     * inferJob ??propJob ?⑤갑???좏샇:
+     *  inferJob ???먰븯?????대줎 ?쇱꽌 ??꾩뒪?ы봽瑜?湲곕줉.
+     *  propJob ???대떦 ts ?댁긽???섑뵆 泥섎━ ???대줎 ?쎌엯 ??-1 濡?由ъ뀑.
      */
     private val pendingCloneTs      = AtomicLong(-1L)
 
     /**
-     * propJob → inferJob 단방향 신호:
-     *  가장 최근에 삽입된 클론의 실제 센서 ts.
+     * propJob ??inferJob ?⑤갑???좏샇:
+     *  媛??理쒓렐???쎌엯???대줎???ㅼ젣 ?쇱꽌 ts.
      */
     private val lastInsertedCloneTs = AtomicLong(-1L)
 
     /**
-     * P3 수정: propJob → inferJob 클론 히스토리 채널.
+     * P3 ?섏젙: propJob ??inferJob ?대줎 ?덉뒪?좊━ 梨꾨꼸.
      *
-     * propJob 이 클론 삽입 시 ts 를 Channel 에 trySend.
-     * inferJob 이 runInferStep() 시작 시 Channel 을 drain 하여
-     * 자신만의 localCloneHistory(ArrayDeque) 에 적재.
-     * → synchronized 블록 없이 단방향 메시지 패싱으로 안전하게 통신.
+     * propJob ???대줎 ?쎌엯 ??ts 瑜?Channel ??trySend.
+     * inferJob ??runInferStep() ?쒖옉 ??Channel ??drain ?섏뿬
+     * ?먯떊留뚯쓽 localCloneHistory(ArrayDeque) ???곸옱.
+     * ??synchronized 釉붾줉 ?놁씠 ?⑤갑??硫붿떆吏 ?⑥떛?쇰줈 ?덉쟾?섍쾶 ?듭떊.
      *
-     * DROP_OLDEST: 버퍼가 가득 찰 경우 오래된 클론 ts 를 자동 제거
-     * (가장 오래된 것은 이미 주변화되어 필요 없음).
+     * DROP_OLDEST: 踰꾪띁媛 媛??李?寃쎌슦 ?ㅻ옒???대줎 ts 瑜??먮룞 ?쒓굅
+     * (媛???ㅻ옒??寃껋? ?대? 二쇰??붾릺???꾩슂 ?놁쓬).
      */
     private val cloneChannel = Channel<Long>(
         capacity       = MAX_CLONE_HISTORY,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
-    // ── 측위 시작 ────────────────────────────────────────────────
+    // ?? 痢≪쐞 ?쒖옉 ????????????????????????????????????????????????
     fun start() {
         if (_state.value.isRunning) return
         startTimeMs = System.currentTimeMillis()
-        Log.i(TAG, "측위 시작 (워밍업 ${WARMUP_DURATION_MS}ms 동안 궤적 표시 억제)")
+        Log.i(TAG, "痢≪쐞 ?쒖옉 (?뚮컢??${WARMUP_DURATION_MS}ms ?숈븞 沅ㅼ쟻 ?쒖떆 ?듭젣)")
 
         viewModelScope.launch(Dispatchers.IO) {
-            // 모델 로드
+            // 紐⑤뜽 濡쒕뱶
             if (!inferEngine.isLoaded()) {
                 try { inferEngine.load() }
-                catch (e: Exception) { Log.e(TAG, "모델 로드 실패: ${e.message}") }
+                catch (e: Exception) { Log.e(TAG, "紐⑤뜽 濡쒕뱶 ?ㅽ뙣: ${e.message}") }
             }
 
-            // EKF 생성
-            EkfBridge.create()
-
-            // IMU 수집 시작
+            // IMU ?섏쭛 ?쒖옉 (罹섎━釉뚮젅?댁뀡 吏꾩엯 ??2珥덇컙 sample ?먯뿉 ?ㅼ뼱媛吏 ?딆쓬)
             imuCollector.start()
 
-            // ── ① EKF 전파 루프 (5ms 폴링, 모든 100Hz 샘플 처리) ──
+            // ?? [P21-ish] 罹섎━釉뚮젅?댁뀡 吏꾪뻾瑜?polling ??????????????????
+            // EkfBridge ?앹꽦쨌propJob ?쒖옉 *?? ??2 珥덇컙 polling.
+            // ImuCollector ??罹섎━釉뚮젅?댁뀡 以??먯뿉 sample ???곸옱?섏? ?딆쑝誘濡?
+            // ?댁감??propJob ??利됱떆 ?쒖옉?쇰룄 ?????놁?留? UI 媛 吏꾪뻾瑜좎쓣
+            // 蹂댁뿬二쇨린 ?꾪빐 紐낆떆?곸쑝濡??湲?
+            _state.value = _state.value.copy(calibrating = true, calibProgress = 0f)
+            while (imuCollector.isCalibrating()) {
+                _state.value = _state.value.copy(
+                    calibrating  = true,
+                    calibProgress = imuCollector.getCalibrationProgress()
+                )
+                delay(50L)
+            }
+            _state.value = _state.value.copy(calibrating = false, calibProgress = 1f)
+
+            // EKF ?앹꽦 (罹섎━釉뚮젅?댁뀡 ?꾨즺 ??
+            EkfBridge.create()
+
+            // ?? ??EKF ?꾪뙆 猷⑦봽 (5ms ?대쭅, 紐⑤뱺 100Hz ?섑뵆 泥섎━) ??
             propJob = viewModelScope.launch(Dispatchers.Default) {
                 while (isActive) {
                     val samples = imuCollector.drainPropagateQueue()
@@ -332,37 +407,37 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
                         if (!EkfBridge.isInitialized()) {
                             EkfBridge.initialize(tsUs, acc)
-                            // [P11] EKF 초기화 직후 Rotation Vector yaw 오프셋 기록.
-                            // 자기계 정확도가 MEDIUM(2) 이상일 때만 기록 — 낮으면 NaN 유지.
-                            // → 나중에 정확도가 올라가면 applyRotVecYaw 가 자동으로 주입 시작.
-                            // → 초기 잘못된 기준점으로 인한 yaw 오프셋 오류 방지.
+                            // [P11] EKF 珥덇린??吏곹썑 Rotation Vector yaw ?ㅽ봽??湲곕줉.
+                            // ?먭린怨??뺥솗?꾧? MEDIUM(2) ?댁긽???뚮쭔 湲곕줉 ????쑝硫?NaN ?좎?.
+                            // ???섏쨷???뺥솗?꾧? ?щ씪媛硫?applyRotVecYaw 媛 ?먮룞?쇰줈 二쇱엯 ?쒖옉.
+                            // ??珥덇린 ?섎せ??湲곗??먯쑝濡??명븳 yaw ?ㅽ봽???ㅻ쪟 諛⑹?.
                             val rvYaw     = imuCollector.getLatestYawRad()
                             val rvAccInit = imuCollector.getRotVecAccuracy()
                             if (!rvYaw.isNaN() && rvAccInit >= 2) {
                                 yawRvAtInit = rvYaw.toDouble()
-                                Log.i(TAG, "Yaw 오프셋 초기화: ${"%.1f".format(Math.toDegrees(yawRvAtInit))}° (정확도 $rvAccInit/3)")
+                                Log.i(TAG, "Yaw ?ㅽ봽??珥덇린?? ${"%.1f".format(Math.toDegrees(yawRvAtInit))}째 (?뺥솗??$rvAccInit/3)")
                             } else {
-                                Log.w(TAG, "Yaw 오프셋 초기화 보류: 자기계 정확도 부족 ($rvAccInit/3) — 정확도 회복 후 자동 설정")
+                                Log.w(TAG, "Yaw ?ㅽ봽??珥덇린??蹂대쪟: ?먭린怨??뺥솗??遺議?($rvAccInit/3) ???뺥솗???뚮났 ???먮룞 ?ㅼ젙")
                             }
                             continue
                         }
 
-                        // [P11] yawRvAtInit 지연 초기화:
-                        // EKF 초기화 시 자기계 정확도가 낮아 오프셋이 NaN 인 경우,
-                        // 정확도가 MEDIUM 이상으로 오르면 그 시점에 오프셋을 기록.
+                        // [P11] yawRvAtInit 吏??珥덇린??
+                        // EKF 珥덇린?????먭린怨??뺥솗?꾧? ??븘 ?ㅽ봽?뗭씠 NaN ??寃쎌슦,
+                        // ?뺥솗?꾧? MEDIUM ?댁긽?쇰줈 ?ㅻⅤ硫?洹??쒖젏???ㅽ봽?뗭쓣 湲곕줉.
                         if (yawRvAtInit.isNaN()) {
                             val rvYaw     = imuCollector.getLatestYawRad()
                             val rvAccNow  = imuCollector.getRotVecAccuracy()
                             if (!rvYaw.isNaN() && rvAccNow >= 2) {
                                 yawRvAtInit = rvYaw.toDouble()
-                                Log.i(TAG, "Yaw 오프셋 지연 초기화: ${"%.1f".format(Math.toDegrees(yawRvAtInit))}° (정확도 $rvAccNow/3)")
+                                Log.i(TAG, "Yaw ?ㅽ봽??吏??珥덇린?? ${"%.1f".format(Math.toDegrees(yawRvAtInit))}째 (?뺥솗??$rvAccNow/3)")
                             }
                         }
 
-                        // 클론 삽입 여부: inferJob 이 예약한 ts 이상이면 삽입
+                        // ?대줎 ?쎌엯 ?щ?: inferJob ???덉빟??ts ?댁긽?대㈃ ?쎌엯
                         val pending = pendingCloneTs.get()
                         val augTs: Long = if (pending >= 0L && tsUs >= pending) {
-                            // compareAndSet 으로 중복 삽입 방지
+                            // compareAndSet ?쇰줈 以묐났 ?쎌엯 諛⑹?
                             if (pendingCloneTs.compareAndSet(pending, -1L)) tsUs else -1L
                         } else {
                             -1L
@@ -372,18 +447,19 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
                         if (augTs >= 0L) {
                             lastInsertedCloneTs.set(augTs)
-                            // P3 수정: synchronized 대신 Channel.trySend 로 비락킹 전달
+                            Log.i(TAG, "[CLONE-INSERT] propJob inserted ts=$augTs")
+                            // P3 ?섏젙: synchronized ???Channel.trySend 濡?鍮꾨씫???꾨떖
                             cloneChannel.trySend(augTs)
-                            Log.v(TAG, "클론 삽입 ts=$augTs → Channel 전달")
+                            Log.v(TAG, "?대줎 ?쎌엯 ts=$augTs ??Channel ?꾨떖")
                         }
                     }
                     delay(PROP_POLL_MS)
                 }
             }
 
-            // ── ② 추론 루프 (경과 시간 보정 20Hz) ─────────────────
+            // ?? ??異붾줎 猷⑦봽 (寃쎄낵 ?쒓컙 蹂댁젙 20Hz) ?????????????????
             inferJob = viewModelScope.launch(Dispatchers.Default) {
-                // P3: inferJob 전용 클론 히스토리 — 이 코루틴만 읽기/쓰기
+                // P3: inferJob ?꾩슜 ?대줎 ?덉뒪?좊━ ????肄붾（?대쭔 ?쎄린/?곌린
                 val localCloneHistory = ArrayDeque<Long>()
 
                 while (isActive) {
@@ -391,7 +467,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                     runInferStep(localCloneHistory)
                     val elapsedMs = (System.nanoTime() - loopStart) / 1_000_000L
                     val remaining = INFER_INTERVAL_MS - elapsedMs
-                    // P6 수정: 항상 최소 1ms yield → 스레드 기아 방지
+                    // P6 ?섏젙: ??긽 理쒖냼 1ms yield ???ㅻ젅??湲곗븘 諛⑹?
                     delay(remaining.coerceAtLeast(1L))
                 }
             }
@@ -400,120 +476,124 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    // ── 측위 정지 ────────────────────────────────────────────────
+    // ?? 痢≪쐞 ?뺤? ????????????????????????????????????????????????
     fun stop() {
         inferJob?.cancel(); inferJob = null
         propJob?.cancel();  propJob  = null
         imuCollector.stop()
         pendingCloneTs.set(-1L)
         lastInsertedCloneTs.set(-1L)
-        // Channel 비우기 (재시작 시 오래된 ts 로 오동작 방지)
+        // Channel 鍮꾩슦湲?(?ъ떆?????ㅻ옒??ts 濡??ㅻ룞??諛⑹?)
         while (cloneChannel.tryReceive().isSuccess) { /* drain */ }
         _state.value = _state.value.copy(isRunning = false)
-        Log.i(TAG, "측위 정지")
+        Log.i(TAG, "痢≪쐞 ?뺤?")
     }
 
-    // ── 초기화 ──────────────────────────────────────────────────
+    // ?? 珥덇린????????????????????????????????????????????????????
     fun reset() {
         stop()
         trackPoints.clear()
         modelTrackPoints.clear()
         modelPosX = 0.0
         modelPosY = 0.0
-        // [아이디어 3] 상태 머신 초기화
+        // [P41 Dead-Reckoning Bypass] 위치 누적 초기화
+        netPosX = 0.0
+        netPosY = 0.0
+        prevUsedEkfUpdate = true
+        // [?꾩씠?붿뼱 3] ?곹깭 癒몄떊 珥덇린??
         motionState          = MotionState.STATIC
         staticCandidateCount = 0
         movingCandidateCount = 0
-        // [P8] Position Hold 앵커 초기화
+        // [P8] Position Hold ?듭빱 珥덇린??
         staticAnchorPos      = null
-        // [아이디어 5] 속도 게이트 초기화
+        // [?꾩씠?붿뼱 5] ?띾룄 寃뚯씠??珥덇린??
         prevEkfVelNorm       = 0.0
-        // 원점 복귀 감지 초기화
+        // ?먯젏 蹂듦? 媛먯? 珥덇린??
         wasAwayFromOrigin    = false
-        // Yaw drift 보정 초기화
+        // Yaw drift 蹂댁젙 珥덇린??
         yawRvAtInit          = Double.NaN
         _state.value = LocalizationState()
     }
 
-    // ── 추론 + EKF 갱신 스텝 ────────────────────────────────────
+    // ?? 異붾줎 + EKF 媛깆떊 ?ㅽ뀦 ????????????????????????????????????
     /**
-     * suspend 함수: delay(CLONE_SETTLE_MS) 포함.
-     * inferJob 코루틴 내에서만 호출.
+     * suspend ?⑥닔: delay(CLONE_SETTLE_MS) ?ы븿.
+     * inferJob 肄붾（???댁뿉?쒕쭔 ?몄텧.
      *
-     * @param localCloneHistory inferJob 전용 클론 히스토리 (락 불필요).
+     * @param localCloneHistory inferJob ?꾩슜 ?대줎 ?덉뒪?좊━ (??遺덊븘??.
      */
     private suspend fun runInferStep(localCloneHistory: ArrayDeque<Long>) {
         if (!EkfBridge.isInitialized()) return
         if (!inferEngine.isLoaded())    return
 
-        // ① 추론 윈도우 확보 (최소 100 샘플 필요)
+        // ??異붾줎 ?덈룄???뺣낫 (理쒖냼 100 ?섑뵆 ?꾩슂)
         val (window, _) = imuCollector.getWindow() ?: return
 
-        // ② [P5→P7] Hysteresis 정지 판정 (클론 예약보다 먼저 수행).
+        // ??[P5?뭁7] Hysteresis ?뺤? ?먯젙 (?대줎 ?덉빟蹂대떎 癒쇱? ?섑뻾).
         //
-        //  P5: 정지 판정 후 클론 차단 + 전체 주변화 → 프리즈 해결, 단 위치 드리프트.
-        //  P7: 정지 판정 후에도 클론 정상 삽입 → zero-disp EKF update + 주변화 + ZUPT.
-        //      위치 제약(std≈1cm) + 속도 제약(ZUPT) 복합 적용 → 드리프트 해소.
+        //  P5: ?뺤? ?먯젙 ???대줎 李⑤떒 + ?꾩껜 二쇰??????꾨━利??닿껐, ???꾩튂 ?쒕━?꾪듃.
+        //  P7: ?뺤? ?먯젙 ?꾩뿉???대줎 ?뺤긽 ?쎌엯 ??zero-disp EKF update + 二쇰???+ ZUPT.
+        //      ?꾩튂 ?쒖빟(std??cm) + ?띾룄 ?쒖빟(ZUPT) 蹂듯빀 ?곸슜 ???쒕━?꾪듃 ?댁냼.
         //
-        //  STATIC → MOVING : gyrRms ≥ threshold 가 MOVING_CONFIRM_FRAMES 연속
-        //  MOVING → STATIC : gyrRms <  threshold 가 STATIC_CONFIRM_FRAMES  연속
+        //  STATIC ??MOVING : gyrRms ??threshold 媛 MOVING_CONFIRM_FRAMES ?곗냽
+        //  MOVING ??STATIC : gyrRms <  threshold 媛 STATIC_CONFIRM_FRAMES  ?곗냽
         val gyrRms        = computeGyrRms(window)
         val isStaticFrame = gyrRms < STATIC_GYR_RMS_THRESHOLD
-        // [진단] 정지 감지 여부 실시간 확인 — 필요 시 주석 처리
+        // [吏꾨떒] ?뺤? 媛먯? ?щ? ?ㅼ떆媛??뺤씤 ???꾩슂 ??二쇱꽍 泥섎━
         Log.v(TAG, "gyrRms=${"%.4f".format(gyrRms)} thr=$STATIC_GYR_RMS_THRESHOLD static=$isStaticFrame state=$motionState")
 
         val currentlyStatic: Boolean = when (motionState) {
             MotionState.STATIC -> {
                 if (isStaticFrame) {
-                    // 정지 유지 — 이동 후보 카운터 리셋
+                    // ?뺤? ?좎? ???대룞 ?꾨낫 移댁슫??由ъ뀑
                     movingCandidateCount = 0
                     true
                 } else {
-                    // 이동 후보 누적
+                    // ?대룞 ?꾨낫 ?꾩쟻
                     movingCandidateCount++
                     staticCandidateCount = 0
                     if (movingCandidateCount >= MOVING_CONFIRM_FRAMES) {
                         motionState = MotionState.MOVING
                         movingCandidateCount = 0
-                        Log.d(TAG, "상태 전환: STATIC → MOVING " +
+                        Log.d(TAG, "?곹깭 ?꾪솚: STATIC ??MOVING " +
                               "(gyrRms=${"%.4f".format(gyrRms)} rad/s, " +
                               "velNorm=${"%.3f".format(prevEkfVelNorm)} m/s)")
-                        // [P9c] STATIC→MOVING 전환 시 stale 클론 이중 플러시
-                        // ① Kotlin localCloneHistory: STATIC 이전 타임스탬프 제거
-                        //    → findBeginClone() 이 stale tBegin 을 찾지 못하게 함
-                        // ② C++ EKF 내부 클론: marginalize 미호출로 남은 오래된 클론 제거
-                        //    → update(tBegin, tEnd) 에서 존재하지 않는 클론 참조 방지
-                        // 두 플러시 후 ~1초간 tBegin 미확보 → update() 자동 스킵
-                        // → 새 클론 ~1초 누적 후 정상 재개
+                        // [P9c] STATIC?묺OVING ?꾪솚 ??stale ?대줎 ?댁쨷 ?뚮윭??
+                        // ??Kotlin localCloneHistory: STATIC ?댁쟾 ??꾩뒪?ы봽 ?쒓굅
+                        //    ??findBeginClone() ??stale tBegin ??李얠? 紐삵븯寃???
+                        // ??C++ EKF ?대? ?대줎: marginalize 誘명샇異쒕줈 ?⑥? ?ㅻ옒???대줎 ?쒓굅
+                        //    ??update(tBegin, tEnd) ?먯꽌 議댁옱?섏? ?딅뒗 ?대줎 李몄“ 諛⑹?
+                        // ???뚮윭????~1珥덇컙 tBegin 誘명솗蹂???update() ?먮룞 ?ㅽ궢
+                        // ?????대줎 ~1珥??꾩쟻 ???뺤긽 ?ш컻
                         localCloneHistory.clear()
                         EkfBridge.flushClones()
                         EkfBridge.thawStaticState()
-                        Log.d(TAG, "STATIC→MOVING: 클론 이중 플러시+공분산 해동 — stale 발산 방지")
-                        false   // 이번 프레임부터 추론 진행
+                        Log.d(TAG, "STATIC?묺OVING: ?대줎 ?댁쨷 ?뚮윭??怨듬텇???대룞 ??stale 諛쒖궛 諛⑹?")
+                        false   // ?대쾲 ?꾨젅?꾨???異붾줎 吏꾪뻾
                     } else {
-                        // 아직 MOVING 미확정 → 정지로 유지
+                        // ?꾩쭅 MOVING 誘명솗?????뺤?濡??좎?
                         true
                     }
                 }
             }
             MotionState.MOVING -> {
                 if (!isStaticFrame) {
-                    // 이동 유지 — 정지 후보 카운터 리셋
+                    // ?대룞 ?좎? ???뺤? ?꾨낫 移댁슫??由ъ뀑
                     staticCandidateCount = 0
                     false
                 } else {
-                    // 정지 후보 누적
+                    // ?뺤? ?꾨낫 ?꾩쟻
                     staticCandidateCount++
                     movingCandidateCount = 0
                     if (staticCandidateCount >= STATIC_CONFIRM_FRAMES) {
                         motionState = MotionState.STATIC
                         staticCandidateCount = 0
-                        Log.d(TAG, "상태 전환: MOVING → STATIC " +
+                        Log.d(TAG, "?곹깭 ?꾪솚: MOVING ??STATIC " +
                               "(gyrRms=${"%.4f".format(gyrRms)} rad/s, " +
                               "velNorm=${"%.3f".format(prevEkfVelNorm)} m/s)")
-                        true    // 이번 프레임부터 ZUPT 적용
+                        true    // ?대쾲 ?꾨젅?꾨???ZUPT ?곸슜
                     } else {
-                        // 아직 STATIC 미확정 → 이동으로 유지 (추론 계속)
+                        // ?꾩쭅 STATIC 誘명솗?????대룞?쇰줈 ?좎? (異붾줎 怨꾩냽)
                         false
                     }
                 }
@@ -521,61 +601,61 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         }
 
         if (currentlyStatic) {
-            // [P9] 정지 상태: Hard State Freeze (EKF 측정 우회 직접 고정)
+            // [P9] ?뺤? ?곹깭: Hard State Freeze (EKF 痢≪젙 ?고쉶 吏곸젒 怨좎젙)
             //
-            // 문제 원인 (P8 실패 이유):
-            //   apply_position_hold(sigma=0.01) + apply_zupt() 조합은
-            //   init_pos_sigma=0.001 → Σ[p,p]=1e-6 m²,  R_pos=(0.01)²=1e-4 m²
-            //   → 칼만 게인 K = 1e-6 / (1e-6 + 1e-4) ≈ 0.01 → 보정 1% 미만
-            //   → 사실상 위치 고정 불가 → 발산 지속.
+            // 臾몄젣 ?먯씤 (P8 ?ㅽ뙣 ?댁쑀):
+            //   apply_position_hold(sigma=0.01) + apply_zupt() 議고빀?
+            //   init_pos_sigma=0.001 ??誇[p,p]=1e-6 m짼,  R_pos=(0.01)짼=1e-4 m짼
+            //   ??移쇰쭔 寃뚯씤 K = 1e-6 / (1e-6 + 1e-4) ??0.01 ??蹂댁젙 1% 誘몃쭔
+            //   ???ъ떎???꾩튂 怨좎젙 遺덇? ??諛쒖궛 吏??
             //
-            // P9 해결책:
-            //   freezeStaticState() — EKF 측정 모델 완전 우회:
-            //   ① state_.p = p_anchor  (직접 위치 고정)
-            //   ② state_.v = Vec3::Zero()  (직접 속도 0)
-            //   ③ Σ[v,v], Σ[p,p] 블록 행·열 전부 0, 대각만 1e-8 (교차 공분산 제거)
-            //   → 칼만 게인 없이 완전 고정 → 가속도계 바이어스 적분 드리프트 100% 차단
+            // P9 ?닿껐梨?
+            //   freezeStaticState() ??EKF 痢≪젙 紐⑤뜽 ?꾩쟾 ?고쉶:
+            //   ??state_.p = p_anchor  (吏곸젒 ?꾩튂 怨좎젙)
+            //   ??state_.v = Vec3::Zero()  (吏곸젒 ?띾룄 0)
+            //   ??誇[v,v], 誇[p,p] 釉붾줉 ?됀룹뿴 ?꾨? 0, ?媛곷쭔 1e-8 (援먯감 怨듬텇???쒓굅)
+            //   ??移쇰쭔 寃뚯씤 ?놁씠 ?꾩쟾 怨좎젙 ??媛?띾룄怨?諛붿씠?댁뒪 ?곷텇 ?쒕━?꾪듃 100% 李⑤떒
 
-            // ① 클론 삽입 차단 (P5 방식 유지)
+            // ???대줎 ?쎌엯 李⑤떒 (P5 諛⑹떇 ?좎?)
             pendingCloneTs.set(-1L)
 
-            // ② 앵커 기록 (STATIC 기간 중 첫 프레임에만 실행)
+            // ???듭빱 湲곕줉 (STATIC 湲곌컙 以?泥??꾨젅?꾩뿉留??ㅽ뻾)
             if (staticAnchorPos == null) {
                 staticAnchorPos = EkfBridge.getPosition().take(3).toDoubleArray()
-                Log.d(TAG, "STATIC 앵커 설정[P9]: " +
+                Log.d(TAG, "STATIC ?듭빱 ?ㅼ젙[P9]: " +
                       "(${"%.3f".format(staticAnchorPos!![0])}, " +
                       "${"%.3f".format(staticAnchorPos!![1])}, " +
                       "${"%.3f".format(staticAnchorPos!![2])}) m")
             }
 
-            // ③ Hard State Freeze: 위치·속도 직접 고정 + 공분산 압축
+            // ??Hard State Freeze: ?꾩튂쨌?띾룄 吏곸젒 怨좎젙 + 怨듬텇???뺤텞
             staticAnchorPos?.let { anchor ->
                 EkfBridge.freezeStaticState(anchor[0], anchor[1], anchor[2])
             }
 
-            // ④ yaw 보정 (자이로 편향 보조 — 회전 드리프트 억제)
+            // ??yaw 蹂댁젙 (?먯씠濡??명뼢 蹂댁“ ???뚯쟾 ?쒕━?꾪듃 ?듭젣)
             applyRotVecYaw("STATIC")
             return
         }
 
-        // MOVING 브랜치 진입 시 앵커 해제 (다음 STATIC 때 새로 기록)
+        // MOVING 釉뚮옖移?吏꾩엯 ???듭빱 ?댁젣 (?ㅼ쓬 STATIC ???덈줈 湲곕줉)
         staticAnchorPos = null
 
-        // ─── 이동(MOVING) 경로 ────────────────────────────────────────
+        // ??? ?대룞(MOVING) 寃쎈줈 ????????????????????????????????????????
 
-        // ③ 끝 클론 예약 — 현재 최신 센서 ts 기준 (wall-clock 사용 금지)
+        // ?????대줎 ?덉빟 ???꾩옱 理쒖떊 ?쇱꽌 ts 湲곗? (wall-clock ?ъ슜 湲덉?)
         val tEndTarget = imuCollector.getLatestSample()?.ts_us ?: return
         pendingCloneTs.set(tEndTarget)
 
-        // ④ propJob 이 클론을 삽입할 때까지 대기 (P4: 20ms → 30ms)
+        // ??propJob ???대줎???쎌엯???뚭퉴吏 ?湲?(P4: 20ms ??30ms)
         delay(CLONE_SETTLE_MS)
 
-        // ⑤ 실제 삽입된 끝 클론 ts 확인
-        //    tEnd < tEndTarget 이면 아직 미삽입 → 이번 스텝 건너뜀
+        // ???ㅼ젣 ?쎌엯?????대줎 ts ?뺤씤
+        //    tEnd < tEndTarget ?대㈃ ?꾩쭅 誘몄궫?????대쾲 ?ㅽ뀦 嫄대꼫?
         val tEnd = lastInsertedCloneTs.get()
         if (tEnd < tEndTarget) return
 
-        // ⑥ P3: Channel 에서 새 클론 ts 를 localCloneHistory 로 drain
+        // ??P3: Channel ?먯꽌 ???대줎 ts 瑜?localCloneHistory 濡?drain
         var newTs = cloneChannel.tryReceive().getOrNull()
         while (newTs != null) {
             localCloneHistory.addLast(newTs)
@@ -583,75 +663,109 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             newTs = cloneChannel.tryReceive().getOrNull()
         }
 
-        // ⑦ 시작 클론 탐색 (~1초 이전, localCloneHistory 에서 가장 가까운 항목)
-        val tBegin = findBeginClone(tEnd, localCloneHistory)
-        if (tBegin < 0L || tBegin >= tEnd) return
-
-        // ⑦-P10: 윈도우 동적 비율 게이팅
-        //   최초 이동 시 추론 윈도우(1초)는 [정지 데이터 85%][이동 15%] 혼합됨.
-        //   네트워크는 이 혼합 윈도우에서 오염된 변위를 예측 → EKF 발산.
-        //   윈도우 내 gyr > threshold 인 샘플 비율이 MIN_DYNAMIC_FRACTION 미만이면 건너뜀.
-        //   cloneHistory 요구(~1초)와 맞물려 혼합 윈도우 업데이트를 이중으로 차단.
-        val dynamicFrac = computeDynamicFraction(window)
-        if (dynamicFrac < MIN_DYNAMIC_FRACTION) {
-            Log.v(TAG, "윈도우 동적 비율 부족 (${"%.2f".format(dynamicFrac)} < $MIN_DYNAMIC_FRACTION) — 업데이트 스킵")
+        // [DEBUG-2] history span 게이팅 — 1초 윈도우 학습 모델과 매칭 위해
+        // localCloneHistory 의 oldest 가 tEnd 보다 충분히 이전일 때만 update 진행.
+        // 짧은 윈도우 (예: 100ms) update 시 모델 출력이 0 근처로 폭락 → EKF 발산.
+        val oldestTs = localCloneHistory.firstOrNull()
+        if (oldestTs == null || (tEnd - oldestTs) < MIN_HISTORY_SPAN_US) {
+            Log.i(TAG, "[GATE-SPAN] history span ${if (oldestTs != null) tEnd - oldestTs else -1L}us < ${MIN_HISTORY_SPAN_US}us — update skip (누적 대기)")
             return
         }
 
-        // ⑧ body frame → gravity-aligned world frame 좌표 변환
-        //    t_begin 클론의 회전 행렬로 yaw를 제거한 월드 프레임으로 변환.
-        //    네트워크는 이 프레임에서 학습되었음 (Python dataset.py acc_ga / gyr_ga).
+        // ???쒖옉 ?대줎 ?먯깋 (~1珥??댁쟾, localCloneHistory ?먯꽌 媛??媛源뚯슫 ??ぉ)
+        val tBegin = findBeginClone(tEnd, localCloneHistory)
+        if (tBegin < 0L || tBegin >= tEnd) return
+
+        // ??P10: ?덈룄???숈쟻 鍮꾩쑉 寃뚯씠??
+        //   理쒖큹 ?대룞 ??異붾줎 ?덈룄??1珥???[?뺤? ?곗씠??85%][?대룞 15%] ?쇳빀??
+        //   ?ㅽ듃?뚰겕?????쇳빀 ?덈룄?곗뿉???ㅼ뿼??蹂?꾨? ?덉륫 ??EKF 諛쒖궛.
+        //   ?덈룄????gyr > threshold ???섑뵆 鍮꾩쑉??MIN_DYNAMIC_FRACTION 誘몃쭔?대㈃ 嫄대꼫?.
+        //   cloneHistory ?붽뎄(~1珥?? 留욌Ъ???쇳빀 ?덈룄???낅뜲?댄듃瑜??댁쨷?쇰줈 李⑤떒.
+        val dynamicFrac = computeDynamicFraction(window)
+        if (dynamicFrac < MIN_DYNAMIC_FRACTION) {
+            Log.v(TAG, "?덈룄???숈쟻 鍮꾩쑉 遺議?(${"%.2f".format(dynamicFrac)} < $MIN_DYNAMIC_FRACTION) ???낅뜲?댄듃 ?ㅽ궢")
+            return
+        }
+
+        // ??body frame ??gravity-aligned world frame 醫뚰몴 蹂??
+        //    t_begin ?대줎???뚯쟾 ?됰젹濡?yaw瑜??쒓굅???붾뱶 ?꾨젅?꾩쑝濡?蹂??
+        //    ?ㅽ듃?뚰겕?????꾨젅?꾩뿉???숈뒿?섏뿀??(Python dataset.py acc_ga / gyr_ga).
         val R_begin = EkfBridge.getCloneRotation(tBegin)
         val worldWindow = if (R_begin.size == 9) {
+            // [YAW-DIAG] yaw drift 진단 — EKF 의 R_begin 에서 추출한 yaw vs RotVec 의 yaw 비교.
+            // 보행 시 ekfYaw 가 빠르게 회전하면 dispLocal(body) 의 world 변환 방향이 매번 달라
+            // xy 궤적이 지그재그가 됨. rvAcc 가 2/3 미만이면 RotVec 자체가 부정확.
+            val ekfYawDeg = Math.toDegrees(atan2(R_begin[3], R_begin[0]))
+            val rvYawRad  = imuCollector.getLatestYawRad()
+            val rvYawDeg  = if (rvYawRad.isNaN()) Double.NaN else Math.toDegrees(rvYawRad.toDouble())
+            val rvAcc     = imuCollector.getRotVecAccuracy()
+            Log.i(TAG, "[YAW-DIAG] ekfYaw=${"%.1f".format(ekfYawDeg)}° " +
+                       "rvYaw=${"%.1f".format(rvYawDeg)}° rvAcc=$rvAcc/3")
             transformWindowToWorldFrame(window, R_begin)
         } else {
-            Log.w(TAG, "클론 회전 없음 (tBegin=$tBegin) — body frame 그대로 사용 (정확도 저하)")
+            Log.w(TAG, "?대줎 ?뚯쟾 ?놁쓬 (tBegin=$tBegin) ??body frame 洹몃?濡??ъ슜 (?뺥솗?????")
             window
         }
 
-        // ⑩ 네트워크 추론 실행
+        // ???ㅽ듃?뚰겕 異붾줎 ?ㅽ뻾
         val inferStart = System.currentTimeMillis()
         val result = try {
             inferEngine.infer(worldWindow)
         } catch (e: Exception) {
-            Log.w(TAG, "추론 실패: ${e.message}")
+            Log.w(TAG, "異붾줎 ?ㅽ뙣: ${e.message}")
             return
         }
         val inferLatency = System.currentTimeMillis() - inferStart
 
-        // ⑪ Context-Aware Adaptive EKF: 분류 확률 벡터로 Q/R 소프트 스위칭
-        //    논문 §4.3.2: R_adaptive = Σ p_k·R^(k), Q_adaptive = Σ p_k·Q^(k)
-        //    EKF_NEW 모델(분류기 없음)은 clsProb=zeros → handheld 기준값 폴백
+        // ??Context-Aware Adaptive EKF: 遺꾨쪟 ?뺣쪧 踰≫꽣濡?Q/R ?뚰봽???ㅼ쐞移?
+        //    ?쇰Ц 짠4.3.2: R_adaptive = 誇 p_k쨌R^(k), Q_adaptive = 誇 p_k쨌Q^(k)
+        //    EKF_NEW 紐⑤뜽(遺꾨쪟湲??놁쓬)? clsProb=zeros ??handheld 湲곗?媛??대갚
         EkfBridge.applySoftSwitching(result.clsProb)
 
-        // ⑫ 변위 측정값 + 공분산 구성
+        // ??蹂??痢≪젙媛?+ 怨듬텇??援ъ꽦
         val meas = doubleArrayOf(
             result.disp[0].toDouble(),
             result.disp[1].toDouble(),
             result.disp[2].toDouble()
         )
         val cov = buildCovMatrix(result.dispCov)
+        // [DEBUG-5 revert] 사용자 평가 = 사진 시점 (DEBUG-5 *없는* 상태) 이 baseline.
+        // z drift fix 는 별도 후속 commit 또는 다음 세션 검증 후 재도입 예정.
 
-        // ⑪ t_begin 인덱스 (주변화 기준) — localCloneHistory 에서 직접 탐색
+        // ??t_begin ?몃뜳??(二쇰???湲곗?) ??localCloneHistory ?먯꽌 吏곸젒 ?먯깋
         val beginIdx = localCloneHistory.indexOfFirst { it == tBegin }
 
-        // ⑪-post: 비정상 변위 필터링
-        //   좌표 변환 오류 또는 네트워크 이상 출력 시 물리적으로 불가능한 변위 제거.
-        //   MAX_DISP_PER_WINDOW_M(6.0m) 초과 = 실내 최대속도(~5m/s) × 1s 초과 → 건너뜀.
+        // ??post: 鍮꾩젙??蹂???꾪꽣留?
+        //   醫뚰몴 蹂???ㅻ쪟 ?먮뒗 ?ㅽ듃?뚰겕 ?댁긽 異쒕젰 ??臾쇰━?곸쑝濡?遺덇??ν븳 蹂???쒓굅.
+        //   MAX_DISP_PER_WINDOW_M(6.0m) 珥덇낵 = ?ㅻ궡 理쒕??띾룄(~5m/s) 횞 1s 珥덇낵 ??嫄대꼫?.
         val dispNorm = sqrt(meas[0] * meas[0] + meas[1] * meas[1] + meas[2] * meas[2])
+        // [DEBUG-3] InferenceEngine 출력 진단 — under-prediction 여부 정량 확인
+        // 보행 1초 윈도우 GT ≈ 0.5~1.5m. 그보다 훨씬 작으면 학습 분포 OOD 가능성.
+        val xyNorm = sqrt(meas[0] * meas[0] + meas[1] * meas[1])
+        val topProbInfer = result.clsProb.maxOrNull() ?: 0f
+        // [P41 진단] clsProb 의 raw 값 + sum + maxLogit 출력 — softmax 미적용 여부 확정용.
+        //   sum 이 1.0 근처 = softmax 적용됨 / sum 이 임의 값 = raw logits.
+        //   maxLogit 와 topProbInfer (= max(clsProb)) 가 동일하므로 변수명만 'topLogitInfer' 가 정확.
+        val clsSumDbg = result.clsProb.sum()
+        Log.i(TAG, "[INFER-OUT] cls=${result.topClass}(${result.className}) " +
+                "p=${"%.3f".format(topProbInfer)} " +
+                "disp=[${"%.4f".format(meas[0])}, ${"%.4f".format(meas[1])}, ${"%.4f".format(meas[2])}] " +
+                "|xy|=${"%.4f".format(xyNorm)}m |3d|=${"%.4f".format(dispNorm)}m " +
+                "dispCovRaw=[${"%.3f".format(result.dispCov[0])}, ${"%.3f".format(result.dispCov[1])}, ${"%.3f".format(result.dispCov[2])}] " +
+                "clsSum=${"%.3f".format(clsSumDbg)} clsRaw=[${result.clsProb.joinToString(",") { "%.2f".format(it) }}]")
         if (dispNorm > MAX_DISP_PER_WINDOW_M) {
-            Log.w(TAG, "비정상 변위 (${"%.2f".format(dispNorm)}m) — EKF 업데이트 건너뜀")
+            Log.w(TAG, "鍮꾩젙??蹂??(${"%.2f".format(dispNorm)}m) ??EKF ?낅뜲?댄듃 嫄대꼫?")
             return
         }
 
-        // ⑪-model: [아이디어 5] 모델 단독 위치 누적 — EKF 속도 게이팅 적용.
+        // ??model: [?꾩씠?붿뼱 5] 紐⑤뜽 ?⑤룆 ?꾩튂 ?꾩쟻 ??EKF ?띾룄 寃뚯씠???곸슜.
         //
-        //  직전 EKF 갱신 후 속도 크기(prevEkfVelNorm)가 MODEL_VELOCITY_GATE 미만이면
-        //  누적을 차단한다.
-        //  ┌─ 이유: 네트워크는 정지 시에도 non-zero displacement 를 출력(바이어스).
-        //  │        EKF 속도가 충분히 작으면 실제로 정지 중임을 의미 → 누적 억제.
-        //  └─ prevEkfVelNorm: 직전 스텝의 EKF update() 후 속도를 저장해 둔 값.
-        //     (이번 스텝 update() 전 속도이므로 1 스텝 지연 — 허용 가능한 오차)
+        //  吏곸쟾 EKF 媛깆떊 ???띾룄 ?ш린(prevEkfVelNorm)媛 MODEL_VELOCITY_GATE 誘몃쭔?대㈃
+        //  ?꾩쟻??李⑤떒?쒕떎.
+        //  ?뚢? ?댁쑀: ?ㅽ듃?뚰겕???뺤? ?쒖뿉??non-zero displacement 瑜?異쒕젰(諛붿씠?댁뒪).
+        //  ??       EKF ?띾룄媛 異⑸텇???묒쑝硫??ㅼ젣濡??뺤? 以묒엫???섎? ???꾩쟻 ?듭젣.
+        //  ?붴? prevEkfVelNorm: 吏곸쟾 ?ㅽ뀦??EKF update() ???띾룄瑜???ν빐 ??媛?
+        //     (?대쾲 ?ㅽ뀦 update() ???띾룄?대?濡?1 ?ㅽ뀦 吏?????덉슜 媛?ν븳 ?ㅼ감)
         if (prevEkfVelNorm >= MODEL_VELOCITY_GATE) {
             modelPosX += meas[0]
             modelPosY += meas[1]
@@ -659,50 +773,125 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             if (modelTrackPoints.size > 5000) modelTrackPoints.removeAt(0)
         }
 
-        // ⑫ EKF 측정 갱신 — t_begin, t_end 모두 si_timestamps_us 에 존재해야 함
+        // ??EKF 痢≪젙 媛깆떊 ??t_begin, t_end 紐⑤몢 si_timestamps_us ??議댁옱?댁빞 ??
+        // [P41 Dead-Reckoning Bypass] Python 원본 (Notion 2026-05-11) 의 핵심 분기:
+        //   trolley (cls 6) 외 모든 클래스에서 EKF.update 우회 → dispLocal 직접 누적.
+        //   USE_DEAD_RECKONING_BYPASS = false 로 토글 시 모두 EKF.update (기존 동작).
+        val useEkfUpdate = !USE_DEAD_RECKONING_BYPASS ||
+                           (result.topClass !in NETWORK_ONLY_CLASSES)
+
+        if (!useEkfUpdate) {
+            // Network-only 모드 — EKF.update 우회 + dispLocal 직접 누적.
+            // 모드 전환 시 netPos 를 EKF 위치로 동기화 (점프 방지).
+            if (prevUsedEkfUpdate) {
+                val curP = EkfBridge.getPosition()
+                netPosX = curP[0]
+                netPosY = curP[1]
+                Log.i(TAG, "[BYPASS] EKF→NetOnly 전환 cls=${result.topClass} sync netPos=(${"%.2f".format(netPosX)},${"%.2f".format(netPosY)})")
+            }
+            // meas (gravity-aligned local frame) → world frame 변위
+            //   world = R_z(yaw0) @ local  →  [cos -sin; sin cos] @ [meas0; meas1]
+            val yaw0 = atan2(R_begin[3], R_begin[0])
+            val cosZ = kotlin.math.cos(yaw0)
+            val sinZ = kotlin.math.sin(yaw0)
+            val dxWorld = cosZ * meas[0] - sinZ * meas[1]
+            val dyWorld = sinZ * meas[0] + cosZ * meas[1]
+            netPosX += dxWorld
+            netPosY += dyWorld
+            Log.i(TAG, "[BYPASS-NET] cls=${result.topClass} dWorld=[${"%.4f".format(dxWorld)},${"%.4f".format(dyWorld)}] netPos=[${"%.3f".format(netPosX)},${"%.3f".format(netPosY)}]")
+            prevUsedEkfUpdate = false
+
+            // marginalize 만 호출 (clone history 관리 위해, EKF.propagate 는 계속 진행)
+            if (beginIdx >= 0) {
+                EkfBridge.marginalize(beginIdx)
+                val rm = (beginIdx + 1).coerceAtMost(localCloneHistory.size)
+                repeat(rm) { if (localCloneHistory.isNotEmpty()) localCloneHistory.removeFirst() }
+            }
+
+            // Yaw 보정은 EKF state.R 위해 계속 호출 (gravity-aligned local frame 정확도 위해)
+            applyRotVecYaw("MOVING-NET")
+
+            // UI state 갱신 (netPos 사용)
+            val pos = EkfBridge.getPosition()  // EKF state — z 등 용도
+            val vel = EkfBridge.getVelocity()
+            prevEkfVelNorm = sqrt(vel[0]*vel[0] + vel[1]*vel[1] + vel[2]*vel[2])
+            val elapsedMs = System.currentTimeMillis() - startTimeMs
+            if (elapsedMs >= WARMUP_DURATION_MS) {
+                trackPoints.add(Pair(netPosX, netPosY))   // ★ Net-only 모드 위치
+                if (trackPoints.size > 5000) trackPoints.removeAt(0)
+            }
+            _state.value = _state.value.copy(
+                position          = Triple(netPosX, netPosY, pos[2]),
+                posStd            = Triple(pos[3], pos[4], pos[5]),
+                velocity          = Triple(vel[0], vel[1], vel[2]),
+                carryMode         = result.className,
+                carryProb         = result.clsProb.maxOrNull() ?: 0f,
+                trackPoints       = trackPoints.toList(),
+                modelTrackPoints  = modelTrackPoints.toList(),
+                inferLatency      = inferLatency
+            )
+            return  // EKF.update 우회, 이후 코드 (post-update 처리) skip
+        }
+
+        // EKF 모드 (trolley 또는 bypass OFF) — 기존 동작.
+        // 직전이 NetOnly 였으면 netPos 를 EKF 위치로 동기화 (다음 NetOnly 진입 대비)
+        if (!prevUsedEkfUpdate) {
+            val curP = EkfBridge.getPosition()
+            netPosX = curP[0]
+            netPosY = curP[1]
+            Log.i(TAG, "[BYPASS] NetOnly→EKF 전환 sync netPos=(${"%.2f".format(netPosX)},${"%.2f".format(netPosY)})")
+        }
+        prevUsedEkfUpdate = true
+
         try {
+            Log.i(TAG, "[UPDATE-TRY] tBegin=$tBegin tEnd=$tEnd histSize=${localCloneHistory.size} hist.first=${localCloneHistory.firstOrNull()} hist.last=${localCloneHistory.lastOrNull()}")
             EkfBridge.update(meas, cov, tBegin, tEnd)
         } catch (e: Exception) {
-            Log.w(TAG, "EKF update 실패: ${e.message}")
+            Log.w(TAG, "EKF update ?ㅽ뙣: ${e.message}")
             return
         }
 
-        // ⑫-P10: 사후 속도 안전망 (Reactive Divergence Recovery)
-        //   EKF update() 후 속도가 MAX_POST_UPDATE_SPEED 초과 시 발산 판정.
-        //   강제 ZUPT(sigma=0.01 m/s, 거의 하드 리셋 수준)로 속도를 0으로 압축.
-        //   이후 EKF 는 정상 상태로 복귀 — 궤적 점프는 발생하나 지속 발산은 방지.
+        // ??P10: ?ы썑 ?띾룄 ?덉쟾留?(Reactive Divergence Recovery)
+        //   EKF update() ???띾룄媛 MAX_POST_UPDATE_SPEED 珥덇낵 ??諛쒖궛 ?먯젙.
+        //   媛뺤젣 ZUPT(sigma=0.01 m/s, 嫄곗쓽 ?섎뱶 由ъ뀑 ?섏?)濡??띾룄瑜?0?쇰줈 ?뺤텞.
+        //   ?댄썑 EKF ???뺤긽 ?곹깭濡?蹂듦? ??沅ㅼ쟻 ?먰봽??諛쒖깮?섎굹 吏??諛쒖궛? 諛⑹?.
         val postUpdateVel = EkfBridge.getVelocity()
         val postUpdateSpeed = sqrt(
             postUpdateVel[0] * postUpdateVel[0] +
             postUpdateVel[1] * postUpdateVel[1] +
             postUpdateVel[2] * postUpdateVel[2]
         )
+        // [DEBUG-3] EKF update 직후 위치/속도 진단
+        val postUpdatePos = EkfBridge.getPosition()
+        Log.i(TAG, "[UPDATE-RES] ekfPos=[${"%.3f".format(postUpdatePos[0])}, ${"%.3f".format(postUpdatePos[1])}, ${"%.3f".format(postUpdatePos[2])}]m " +
+                "ekfSpeed=${"%.3f".format(postUpdateSpeed)}m/s " +
+                "meas|xy|=${"%.4f".format(sqrt(meas[0]*meas[0]+meas[1]*meas[1]))}m")
         if (postUpdateSpeed > MAX_POST_UPDATE_SPEED) {
-            Log.w(TAG, "발산 감지: 속도 ${"%.2f".format(postUpdateSpeed)} m/s > ${MAX_POST_UPDATE_SPEED} — ZUPT 강제 적용")
+            Log.w(TAG, "諛쒖궛 媛먯?: ?띾룄 ${"%.2f".format(postUpdateSpeed)} m/s > ${MAX_POST_UPDATE_SPEED} ??ZUPT 媛뺤젣 ?곸슜")
             EkfBridge.applyZupt(0.01)
         }
 
-        // ⑬ 주변화: tBegin 포함 그 이전 클론 모두 제거
-        //    C++ marginalize(idx) 는 0..idx 포함 삭제 (rm = idx+1)
+        // ??二쇰??? tBegin ?ы븿 洹??댁쟾 ?대줎 紐⑤몢 ?쒓굅
+        //    C++ marginalize(idx) ??0..idx ?ы븿 ??젣 (rm = idx+1)
         if (beginIdx >= 0) {
             EkfBridge.marginalize(beginIdx)
             val rm = (beginIdx + 1).coerceAtMost(localCloneHistory.size)
             repeat(rm) { if (localCloneHistory.isNotEmpty()) localCloneHistory.removeFirst() }
         }
 
-        // ⑭ Yaw drift 보정 (이동 중): EKF update 직후 주입
+        // ??Yaw drift 蹂댁젙 (?대룞 以?: EKF update 吏곹썑 二쇱엯
         applyRotVecYaw("MOVING")
 
-        // ⑮ 위치/속도 조회 → UI 갱신
+        // ???꾩튂/?띾룄 議고쉶 ??UI 媛깆떊
         val pos = EkfBridge.getPosition()  // [px, py, pz, sx, sy, sz]
         val vel = EkfBridge.getVelocity()  // [vx, vy, vz]
 
-        // [아이디어 5] 다음 스텝의 모델 only 게이팅을 위해 현재 속도 크기 저장
+        // [?꾩씠?붿뼱 5] ?ㅼ쓬 ?ㅽ뀦??紐⑤뜽 only 寃뚯씠?낆쓣 ?꾪빐 ?꾩옱 ?띾룄 ?ш린 ???
         prevEkfVelNorm = sqrt(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2])
 
-        // [P10] 워밍업 기간 동안 궤적 표시 억제
-        // EKF 는 계속 실행(바이어스 수렴·공분산 안정화·클론 누적)하되
-        // 화면에는 WARMUP_DURATION_MS 이후부터 점을 찍기 시작.
+        // [P10] ?뚮컢??湲곌컙 ?숈븞 沅ㅼ쟻 ?쒖떆 ?듭젣
+        // EKF ??怨꾩냽 ?ㅽ뻾(諛붿씠?댁뒪 ?섎졃쨌怨듬텇???덉젙?붋룻겢濡??꾩쟻)?섎릺
+        // ?붾㈃?먮뒗 WARMUP_DURATION_MS ?댄썑遺???먯쓣 李띻린 ?쒖옉.
         val elapsedMs = System.currentTimeMillis() - startTimeMs
         if (elapsedMs >= WARMUP_DURATION_MS) {
             trackPoints.add(Pair(pos[0], pos[1]))
@@ -720,7 +909,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             inferLatency      = inferLatency
         )
     }
-
     // ── 헬퍼: 시작 클론 탐색 ─────────────────────────────────────
     /**
      * localCloneHistory 에서 (tEndUs - WINDOW_DURATION_US) 에 가장 가까운 항목 반환.
@@ -741,17 +929,296 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
     // ── 헬퍼: 변위 공분산 행렬 구성 ────────────────────────────
     /**
-     * 네트워크 출력 log-variance → variance 변환 후 3×3 대각 행렬(row-major).
+     * 네트워크 출력 log-variance → variance 변환 후 3×3 대각 행렬 (row-major).
      *
-     * Python 원본(meas_source_torchscript.py):
+     * Python 원본 (meas_source_torchscript.py):
      *   meas_cov[meas_cov < -4] = -4   ← exp(-4) ≈ 0.018 m² 가 최소 분산
      *
-     * 이전 코드는 variance를 1e-6 까지 허용해 과도한 신뢰 가능성이 있었음.
-     * log-variance를 -4 에서 클리핑 후 exp 적용으로 Python 동작과 일치.
+     * 추가로 MIN_MEAS_COV 로 바닥 클램프 — 네트워크가 과도하게 자신감 있는 예측을
+     * 할 때 EKF 가 맹목적으로 따라가는 것을 방지 (Kalman 게인이 1 에 가까워지지 않도록).
      */
     private fun buildCovMatrix(dispCov: FloatArray): DoubleArray {
+        // [P41 #C FIX] 모델 출력 dispCov[i] = pred_log_std (log standard deviation, TLIO 표준)
+        //   확정 근거: bypass01 측정에서 dispCovRaw 범위 -6~-3.4 (mean -4.3) = log_std 범위
+        //   meas_source_torchscript.py 의 outputs['pred_log_std'] + DiagonalParam.vec2Cov
+        //   → variance = exp(2 * log_std)   (NOT exp(log_std))
+        //
+        //   기존 코드 (`exp(log_std)`) 는 *std 를 variance 로 잘못 사용* → 모든 EKF.update
+        //   에서 cov 가 √cov 배 (~7×) 크게 들어가 Kalman gain 작음 → dispLocal 측정값
+        //   덜 반영 → under-prediction 일관 발생. 이 fix 가 모든 update 정확도 회복.
+        //
+        //   롤백 시: `exp(2.0 * logStd)` → `exp(logStd)` 로 1줄.
         val cov = DoubleArray(9) { 0.0 }
         for (i in 0 until 3) {
-            val logVar = dispCov[i].toDouble().coerceAtLeast(-4.0)  // Python: clip < -4
-            // [P9d] 최솟값 MIN_MEAS_COV 로 바닥 설정:
-            // 네�
+            val logStd   = dispCov[i].toDouble().coerceAtLeast(-4.0)    // Python: clip < -4
+            val variance = kotlin.math.exp(2.0 * logStd).coerceAtLeast(MIN_MEAS_COV)
+            cov[i * 3 + i] = variance
+        }
+        return cov
+    }
+
+    // ── 헬퍼: 윈도우 자이로 RMS ────────────────────────────────
+    /**
+     * 윈도우 (channel-major FloatArray[6 × WINDOW_SIZE]) 의 자이로 채널 (ch 3-5) 의
+     * 전체 sample-axis RMS 를 계산. 정지/이동 판정용.
+     *
+     * 정지 MEMS 자이로 노이즈 ≈ 0.003-0.01 rad/s RMS.
+     * 보행 자이로 ≈ 0.1-0.5 rad/s RMS.
+     * STATIC_GYR_RMS_THRESHOLD = 0.08 rad/s 가 두 경계의 중간값.
+     */
+    private fun computeGyrRms(window: FloatArray): Float {
+        val ws = ImuCollector.WINDOW_SIZE
+        var sumSq = 0.0
+        var n = 0
+        for (c in 3..5) {
+            for (t in 0 until ws) {
+                val v = window[c * ws + t].toDouble()
+                sumSq += v * v
+                n++
+            }
+        }
+        return if (n > 0) kotlin.math.sqrt(sumSq / n).toFloat() else 0f
+    }
+
+    // ── 헬퍼: 윈도우 동적 sample 비율 ───────────────────────────
+    /**
+     * 윈도우 100 샘플 중 자이로 벡터 노름이 STATIC_GYR_RMS_THRESHOLD 를 초과한 비율.
+     *
+     * [P10] 최초 이동 시 윈도우는 [정지 85%][이동 15%] 혼합 → 네트워크 출력 오염.
+     * 이 비율이 MIN_DYNAMIC_FRACTION (0.5) 미만이면 추론을 건너뛴다.
+     */
+    private fun computeDynamicFraction(window: FloatArray): Float {
+        val ws = ImuCollector.WINDOW_SIZE
+        val thr = STATIC_GYR_RMS_THRESHOLD.toDouble()
+        var dynamicCount = 0
+        for (t in 0 until ws) {
+            val gx = window[3 * ws + t].toDouble()
+            val gy = window[4 * ws + t].toDouble()
+            val gz = window[5 * ws + t].toDouble()
+            val gNorm = kotlin.math.sqrt(gx * gx + gy * gy + gz * gz)
+            if (gNorm > thr) dynamicCount++
+        }
+        return dynamicCount.toFloat() / ws.toFloat()
+    }
+
+    // ── 헬퍼: TYPE_ROTATION_VECTOR yaw 측정 주입 ─────────────────
+    /**
+     * Android TYPE_ROTATION_VECTOR 의 yaw 를 EKF 에 주입 (자이로 적분 drift 보정).
+     *
+     * 보정 공식:
+     *   yaw_meas (EKF 월드 프레임 기준) = yaw_rv_current − yaw_rv_at_init
+     *
+     * 게이팅:
+     *   ① yawRvAtInit 가 NaN (오프셋 미초기화 — 자기계 정확도 낮을 때) → skip
+     *   ② imuCollector.getLatestYawRad() NaN (rotVecSensor 없음 또는 미수신) → skip
+     *   ③ 자기계 정확도 < MEDIUM (2) → skip (UNRELIABLE / LOW 시 부정확)
+     *
+     * @param label 호출 분기 식별자 ("STATIC" / "MOVING") — 로그 구분용
+     */
+    private fun applyRotVecYaw(label: String) {
+        if (yawRvAtInit.isNaN()) return
+        val yawRv = imuCollector.getLatestYawRad()
+        if (yawRv.isNaN()) return
+        val rvAcc = imuCollector.getRotVecAccuracy()
+        if (rvAcc < 2) return
+
+        // [P41 YAW-WRAP FIX] yawRv 와 yawRvAtInit 가 모두 atan2 결과 (±π wrap)
+        //   단순 뺄셈은 ±π 경계 통과 시 ±2π fictitious 점프 발생 (실제 회전 N° → -360+N° 또는 +360+N°).
+        //   이 잘못된 yawMeas 가 EKF 에 매 추론(20Hz)마다 주입 → state.yaw 가 누적 fictitious drift.
+        //   →  실측: walk30s 30초간 -850°, walk_clear 22초간 -358° drift 의 *직접 원인*.
+        //   해결: yawMeas 를 ±π 범위로 wrap (실제 회전량만 EKF 에 전달).
+        var yawMeas = yawRv.toDouble() - yawRvAtInit
+        while (yawMeas >  Math.PI) yawMeas -= 2.0 * Math.PI
+        while (yawMeas < -Math.PI) yawMeas += 2.0 * Math.PI
+        try {
+            EkfBridge.applyYawUpdate(yawMeas, YAW_SIGMA_RAD)
+        } catch (e: Exception) {
+            Log.w(TAG, "[$label] yaw 주입 실패: ${e.message}")
+        }
+    }
+
+    // ── 헬퍼: body frame 윈도우 → gravity-aligned world frame ───
+    /**
+     * 윈도우의 6 채널 (linAcc body + gyr body) 을 t_begin 클론의 회전 행렬로
+     * gravity-aligned world frame (= yaw 가 제거된 world frame) 으로 변환.
+     *
+     * 학습 데이터 (Python dataset.py 의 acc_ga / gyr_ga) 와 동일한 좌표계로
+     * 만들어 네트워크 입력 분포 mismatch 를 최소화.
+     *
+     * 변환:
+     *   R_ga_from_body = R_yaw_inv · R_begin
+     *   where R_yaw_inv = z-축 (-yaw0) 회전, yaw0 = atan2(R_begin[1,0], R_begin[0,0])
+     *
+     *   v_ga = R_ga_from_body · v_body
+     *
+     * row-major 인덱싱: R_begin[row*3 + col] → R[0,0]=R_begin[0], R[1,0]=R_begin[3], …
+     *
+     * @param window  channel-major FloatArray[6 × WINDOW_SIZE] (ch 0-2 linAcc body, ch 3-5 gyr body)
+     * @param R_begin t_begin 시점 EKF 클론의 world←body 회전 (9-element row-major)
+     * @return 동일 형식의 yaw-free world frame 윈도우
+     */
+    private fun transformWindowToWorldFrame(window: FloatArray, R_begin: DoubleArray): FloatArray {
+        if (R_begin.size != 9) return window  // 안전 fallback
+
+        // [P41 R_all[t] Frame v2] Python `_get_imu_samples_for_network` 와 동일 처리로 분기.
+        //   USE_R_ALL_T_FRAME = true → 매 시점 자이로 적분 R[t] (Python 동일)
+        //     v2: raw gyr (P21 차감 후, LPF 안 됨) 사용 — getRawGyrWindow() 호출.
+        //     bg 추가 차감 안 함 (이중 차감 회피).
+        //   false → 기존 R_begin 1개 방식
+        if (USE_R_ALL_T_FRAME) {
+            val rawGyr = imuCollector.getRawGyrWindow()
+            if (rawGyr != null) {
+                return transformWindowR_all(window, R_begin, rawGyr)
+            }
+            // rawGyr null (윈도우 미충족) → fallback 으로 기존 방식
+        }
+
+        val ws = ImuCollector.WINDOW_SIZE
+        val out = FloatArray(window.size)
+
+        // R_begin 의 yaw 추출 (ZYX Euler convention)
+        val yaw0 = atan2(R_begin[3], R_begin[0])
+        val cosZ = cos(yaw0)
+        val sinZ = sin(yaw0)
+
+        // R_ga_from_body[i][j] = Σ_k R_yaw_inv[i][k] · R_begin[k][j]
+        //   R_yaw_inv = | cos(yaw0)  sin(yaw0)  0 |
+        //               |-sin(yaw0)  cos(yaw0)  0 |
+        //               | 0          0          1 |
+        val r00 =  cosZ * R_begin[0] + sinZ * R_begin[3]
+        val r01 =  cosZ * R_begin[1] + sinZ * R_begin[4]
+        val r02 =  cosZ * R_begin[2] + sinZ * R_begin[5]
+        val r10 = -sinZ * R_begin[0] + cosZ * R_begin[3]
+        val r11 = -sinZ * R_begin[1] + cosZ * R_begin[4]
+        val r12 = -sinZ * R_begin[2] + cosZ * R_begin[5]
+        val r20 = R_begin[6]
+        val r21 = R_begin[7]
+        val r22 = R_begin[8]
+
+        for (t in 0 until ws) {
+            // linAcc (ch 0-2)
+            val lx = window[0 * ws + t].toDouble()
+            val ly = window[1 * ws + t].toDouble()
+            val lz = window[2 * ws + t].toDouble()
+            out[0 * ws + t] = (r00 * lx + r01 * ly + r02 * lz).toFloat()
+            out[1 * ws + t] = (r10 * lx + r11 * ly + r12 * lz).toFloat()
+            out[2 * ws + t] = (r20 * lx + r21 * ly + r22 * lz).toFloat()
+            // gyr (ch 3-5)
+            val gx = window[3 * ws + t].toDouble()
+            val gy = window[4 * ws + t].toDouble()
+            val gz = window[5 * ws + t].toDouble()
+            out[3 * ws + t] = (r00 * gx + r01 * gy + r02 * gz).toFloat()
+            out[4 * ws + t] = (r10 * gx + r11 * gy + r12 * gz).toFloat()
+            out[5 * ws + t] = (r20 * gx + r21 * gy + r22 * gz).toFloat()
+        }
+        return out
+    }
+
+    // ── [P41 R_all[t]] body frame → world frame, 매 시점 자이로 적분 ──────
+    /**
+     * Python `_get_imu_samples_for_network` 와 동일 처리.
+     *
+     * 단계:
+     *  1. R_begin 의 yaw 제거 → R_yawfree (= R_oldest_state_wfb)
+     *  2. EKF s_bg 가져옴 (동적 자이로 bias)
+     *  3. 매 시점 자이로 적분 — Rs_bofbi[t] = Rs_bofbi[t-1] · exp(skew((gyr-bg)·dt))
+     *     (begin time frame 기준 누적 회전)
+     *  4. Rs_net_wfb[t] = R_yawfree · Rs_bofbi[t]  (시점별 world frame R)
+     *  5. acc_world[t] = Rs_net_wfb[t] · acc_body[t]
+     *     gyr_world[t] = Rs_net_wfb[t] · gyr_body[t]
+     */
+    private fun transformWindowR_all(window: FloatArray, R_begin: DoubleArray, rawGyr: FloatArray): FloatArray {
+        val ws = ImuCollector.WINDOW_SIZE
+        val out = FloatArray(window.size)
+        val dt = 1.0 / ImuCollector.TARGET_HZ.toDouble()   // = 0.01 s (100 Hz)
+
+        // 1. R_yawfree = R_yaw_inv · R_begin
+        val yaw0 = atan2(R_begin[3], R_begin[0])
+        val cosZ = cos(yaw0)
+        val sinZ = sin(yaw0)
+        val Ryf = DoubleArray(9)
+        Ryf[0] =  cosZ * R_begin[0] + sinZ * R_begin[3]
+        Ryf[1] =  cosZ * R_begin[1] + sinZ * R_begin[4]
+        Ryf[2] =  cosZ * R_begin[2] + sinZ * R_begin[5]
+        Ryf[3] = -sinZ * R_begin[0] + cosZ * R_begin[3]
+        Ryf[4] = -sinZ * R_begin[1] + cosZ * R_begin[4]
+        Ryf[5] = -sinZ * R_begin[2] + cosZ * R_begin[5]
+        Ryf[6] = R_begin[6]; Ryf[7] = R_begin[7]; Ryf[8] = R_begin[8]
+
+        // 2. [P41 v2] EKF s_bg 추가 차감 제거 — rawGyr 가 이미 P21 차감된 상태.
+        //    EKF s_bg 추가 차감은 *이중 차감* 으로 1차 시도에서 발산 야기 (롤백됨).
+
+        // 3. 매 시점 자이로 적분 — Rs_bofbi[t] (begin time frame 기준)
+        //    Rs_bofbi[0] = I (begin 시점은 정렬됨)
+        //    메모리 절약 위해 누적 R 만 유지 (이전 R 만 필요)
+        val curR = doubleArrayOf(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)   // I
+
+        // 4-5. 각 시점 t 마다 누적 R[t] 적용
+        for (t in 0 until ws) {
+            // 시점 t 의 누적 R[t] (begin frame → body[t] frame)
+            // t=0 에서는 curR = I (begin 자체)
+            // 이후 dR(rawGyr[t-1] 적분) 으로 갱신 후 사용
+            if (t > 0) {
+                // [P41 v2] rawGyr (P21 차감 후, LPF 안 됨) 사용. bg 차감 안 함.
+                val gx = rawGyr[0 * ws + (t - 1)].toDouble()
+                val gy = rawGyr[1 * ws + (t - 1)].toDouble()
+                val gz = rawGyr[2 * ws + (t - 1)].toDouble()
+                val dR = matExp(gx * dt, gy * dt, gz * dt)
+                val newR = mat3Mul(curR, dR)
+                System.arraycopy(newR, 0, curR, 0, 9)
+            }
+
+            // Rs_net_wfb[t] = R_yawfree · Rs_bofbi[t] = Ryf · curR
+            val rNet = mat3Mul(Ryf, curR)
+
+            // acc_world[t] = rNet · acc_body[t]
+            val lx = window[0 * ws + t].toDouble()
+            val ly = window[1 * ws + t].toDouble()
+            val lz = window[2 * ws + t].toDouble()
+            out[0 * ws + t] = (rNet[0] * lx + rNet[1] * ly + rNet[2] * lz).toFloat()
+            out[1 * ws + t] = (rNet[3] * lx + rNet[4] * ly + rNet[5] * lz).toFloat()
+            out[2 * ws + t] = (rNet[6] * lx + rNet[7] * ly + rNet[8] * lz).toFloat()
+
+            // gyr_world[t] = rNet · gyr_body[t]
+            val gx = window[3 * ws + t].toDouble()
+            val gy = window[4 * ws + t].toDouble()
+            val gz = window[5 * ws + t].toDouble()
+            out[3 * ws + t] = (rNet[0] * gx + rNet[1] * gy + rNet[2] * gz).toFloat()
+            out[4 * ws + t] = (rNet[3] * gx + rNet[4] * gy + rNet[5] * gz).toFloat()
+            out[5 * ws + t] = (rNet[6] * gx + rNet[7] * gy + rNet[8] * gz).toFloat()
+        }
+        return out
+    }
+
+    // ── 헬퍼: Rodrigues' formula — exp(skew([rx, ry, rz])) ─────
+    /** 회전 벡터 (axis × angle) → 3×3 rotation matrix (row-major) */
+    private fun matExp(rx: Double, ry: Double, rz: Double): DoubleArray {
+        val theta = sqrt(rx * rx + ry * ry + rz * rz)
+        val R = DoubleArray(9)
+        if (theta < 1e-10) {
+            R[0] = 1.0; R[4] = 1.0; R[8] = 1.0
+            return R
+        }
+        val invT = 1.0 / theta
+        val kx = rx * invT; val ky = ry * invT; val kz = rz * invT
+        val s  = sin(theta); val c = cos(theta); val mc = 1.0 - c
+        R[0] = c + kx*kx*mc;     R[1] = kx*ky*mc - kz*s; R[2] = kx*kz*mc + ky*s
+        R[3] = ky*kx*mc + kz*s;  R[4] = c + ky*ky*mc;    R[5] = ky*kz*mc - kx*s
+        R[6] = kz*kx*mc - ky*s;  R[7] = kz*ky*mc + kx*s; R[8] = c + kz*kz*mc
+        return R
+    }
+
+    // ── 헬퍼: 3×3 행렬 곱 (row-major) ───────────────────────
+    /** C = A · B  (모두 9-element row-major DoubleArray) */
+    private fun mat3Mul(A: DoubleArray, B: DoubleArray): DoubleArray {
+        val C = DoubleArray(9)
+        for (i in 0..2) {
+            for (j in 0..2) {
+                var sum = 0.0
+                for (k in 0..2) sum += A[i * 3 + k] * B[k * 3 + j]
+                C[i * 3 + j] = sum
+            }
+        }
+        return C
+    }
+}

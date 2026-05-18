@@ -76,7 +76,7 @@ class MainActivity : AppCompatActivity() {
                 // 캘리브레이션 진행 중에만 카드 표시, 완료 시 자동 숨김.
                 if (s.calibrating) {
                     binding.calibCard.visibility = View.VISIBLE
-                    val pct = (s.calibProgress * 100f).toInt().coerceIn(0, 100)
+                    val pct = (s. calibProgress * 100f).toInt().coerceIn(0, 100)
                     binding.calibProgress.progress = pct
                     binding.tvCalibPercent.text = String.format("%d %%", pct)
                 } else {

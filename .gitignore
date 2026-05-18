@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────────────────────
+# Gradle / Android Studio / NDK build artifacts
+# ─────────────────────────────────────────────────────────────
+.gradle/
+android/.gradle/
+android/build/
+android/.idea/
+android/app/build/
+android/app/.cxx/
+android/captures/
+android/local.properties
+*.iml
+*.lock
+local.properties
+
+# ─────────────────────────────────────────────────────────────
+# Python — virtual env / cache / extracted artifacts
+# ─────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv*/
+.venv_convert/
+.pip.cache/
+.pip_cache/
+.torch_extract/
+
+# ─────────────────────────────────────────────────────────────
+# Temporary / OS / editor
+# ─────────────────────────────────────────────────────────────
+.tmp/
+*.tmp
+*.bak
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─────────────────────────────────────────────────────────────
+# Local-only analysis / measurement results (push 제외, 로컬 보존)
+# ─────────────────────────────────────────────────────────────
+_legacy/
+_archive/
+csv/
+logs/
+outputs/
+
+# ─────────────────────────────────────────────────────────────
+# Test logcat 임시 캡처
+# ─────────────────────────────────────────────────────────────
+test_*.txt
+*.logcat
+adb_*.txt
+
+# ─────────────────────────────────────────────────────────────
+# git 진단용 임시 헤더 dump (다른 브랜치 비교 시 root 에 생기는 것들)
+# ─────────────────────────────────────────────────────────────
+/imu_ekf_*.h
+/*_check.h
+/*_backup.h
+
+# ─────────────────────────────────────────────────────────────
+# Misc (jupyter / matplotlib / etc.)
+# ─────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ─────────────────────────────────────────────────────────────
+# Optional: 학습 데이터셋 raw 파일 (대용량, 별도 관리)
+# (TLIO_Oxford_Dataset 는 의도적으로 push — 다음 세션 분석에 필요)
+# 만약 너무 크면 아래 주석 해제:
+# src/TLIO_Oxford_Dataset/
+# ─────────────────────────────────────────────────────────────

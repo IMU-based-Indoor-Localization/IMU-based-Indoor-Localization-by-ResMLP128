@@ -53,18 +53,42 @@ class ImuCollector(context: Context) : SensorEventListener {
          * EkfBridge 초기화도 자연스럽게 지연된다.
          */
         const val CALIBRATION_DURATION_MS: Long = 2_000L
+
+        // ─────────────────────────────────────────────────────────────
+        // [P33-A1 재도입] Butterworth 2차 LPF (fs=100Hz, fc=12Hz)
+        // ─────────────────────────────────────────────────────────────
+        // scipy.signal.butter(2, 12, btype='low', fs=100) 결과:
+        //   b = [0.09131490, 0.18262980, 0.09131490]
+        //   a = [1.0, -0.98240579, 0.34766539]
+        // Direct Form I: y[n] = b0·x[n] + b1·x[n-1] + b2·x[n-2] − a1·y[n-1] − a2·y[n-2]
+        //
+        // 적용 위치: ringBuffer 의 linAcc/gyr 만 (네트워크 입력용).
+        // propagateQueue 의 raw acc/gyr 는 LPF 없이 EKF propagate 로 전달
+        //   → propagate 적분 정확도 유지 (HANDOFF P38 §P35 교훈 반영).
+        //
+        // iPhone Core Motion 의 내부 필터링을 흉내내어 분류기 OOD 완화.
+        // HANDOFF P38 §P33-A1: 단방향 단계에서 unknown 100% → 84% 효과 확인됨.
+        private const val LPF_B0: Float =  0.09131490f
+        private const val LPF_B1: Float =  0.18262980f
+        private const val LPF_B2: Float =  0.09131490f
+        private const val LPF_A1: Float = -0.98240579f
+        private const val LPF_A2: Float =  0.34766539f
     }
 
     /**
-     * @param acc    TYPE_ACCELEROMETER [ax, ay, az] m/s²  (중력 포함 — EKF 전파용)
-     * @param gyr    TYPE_GYROSCOPE     [gx, gy, gz] rad/s
-     * @param linAcc TYPE_LINEAR_ACCELERATION [lx, ly, lz] m/s² (중력 제거 — 네트워크 입력용)
+     * @param acc       TYPE_ACCELEROMETER [ax, ay, az] m/s²  (중력 포함, RAW — EKF 전파용)
+     * @param gyr       TYPE_GYROSCOPE     [gx, gy, gz] rad/s  (RAW — EKF 전파용)
+     * @param linAcc    TYPE_LINEAR_ACCELERATION [lx, ly, lz] m/s² (RAW — bias 차감 후)
+     * @param linAccLpf [P33-A1] linAcc 의 Butterworth fc=12Hz LPF 버전 (네트워크 입력용)
+     * @param gyrLpf    [P33-A1] gyr 의 Butterworth fc=12Hz LPF 버전 (네트워크 입력용)
      */
     data class ImuSample(
-        val ts_us:  Long,
-        val acc:    FloatArray,   // [ax, ay, az]  m/s²  (includes gravity) — EKF용
-        val gyr:    FloatArray,   // [gx, gy, gz]  rad/s
-        val linAcc: FloatArray    // [lx, ly, lz]  m/s²  (no gravity)      — 네트워크용
+        val ts_us:     Long,
+        val acc:       FloatArray,   // [ax, ay, az]  m/s²  RAW (gravity included)  → EKF
+        val gyr:       FloatArray,   // [gx, gy, gz]  rad/s RAW                     → EKF
+        val linAcc:    FloatArray,   // [lx, ly, lz]  m/s²  RAW (no gravity)        → 진단용
+        val linAccLpf: FloatArray,   // [lx, ly, lz]  m/s²  LPF                     → 네트워크
+        val gyrLpf:    FloatArray    // [gx, gy, gz]  rad/s LPF                     → 네트워크
     )
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -139,6 +163,38 @@ class ImuCollector(context: Context) : SensorEventListener {
     private val linAccBias: FloatArray = FloatArray(3)
     private val gyrBias:    FloatArray = FloatArray(3)
 
+    // ── [P33-A1 재도입] LPF state (Direct Form I, 6 채널) ───────
+    // 채널 인덱스: 0=linAcc.x, 1=linAcc.y, 2=linAcc.z, 3=gyr.x, 4=gyr.y, 5=gyr.z
+    private val lpfX1: FloatArray = FloatArray(6)  // x[n-1]
+    private val lpfX2: FloatArray = FloatArray(6)  // x[n-2]
+    private val lpfY1: FloatArray = FloatArray(6)  // y[n-1]
+    private val lpfY2: FloatArray = FloatArray(6)  // y[n-2]
+
+    /**
+     * [P33-A1] Direct Form I 한 step. 채널 state 갱신 후 LPF 출력 반환.
+     * y[n] = b0·x[n] + b1·x[n-1] + b2·x[n-2] − a1·y[n-1] − a2·y[n-2]
+     */
+    private fun lpfStep(ch: Int, xn: Float): Float {
+        val yn = LPF_B0 * xn +
+                 LPF_B1 * lpfX1[ch] +
+                 LPF_B2 * lpfX2[ch] -
+                 LPF_A1 * lpfY1[ch] -
+                 LPF_A2 * lpfY2[ch]
+        lpfX2[ch] = lpfX1[ch]
+        lpfX1[ch] = xn
+        lpfY2[ch] = lpfY1[ch]
+        lpfY1[ch] = yn
+        return yn
+    }
+
+    /** [P33-A1] LPF state 전체 0 으로 초기화 (start/stop 시 호출). */
+    private fun resetLpfState() {
+        for (i in 0..5) {
+            lpfX1[i] = 0f; lpfX2[i] = 0f
+            lpfY1[i] = 0f; lpfY2[i] = 0f
+        }
+    }
+
     // ── 시작 / 종료 ─────────────────────────────────────────────
     fun start() {
         lastSampleTs  = -1L
@@ -163,6 +219,9 @@ class ImuCollector(context: Context) : SensorEventListener {
             linAccBias[i] = 0f
             gyrBias[i]    = 0f
         }
+        // [P33-A1] LPF state 초기화
+        resetLpfState()
+
         Log.i(TAG, "[P21] 영점 보정 ${CALIBRATION_DURATION_MS}ms 시작 — 기기 정지 유지 필요")
 
         sensorManager.registerListener(this, accelSensor,  SensorManager.SENSOR_DELAY_FASTEST)
@@ -186,6 +245,9 @@ class ImuCollector(context: Context) : SensorEventListener {
     fun stop() {
         sensorManager.unregisterListener(this)
         propagateQueue.clear()
+
+        // [P33-A1] LPF state 리셋
+        resetLpfState()
 
         // [P21-ish] 캘리브레이션 상태 리셋
         calibrating         = false
@@ -281,11 +343,24 @@ class ImuCollector(context: Context) : SensorEventListener {
         gyrCorr[1] = latestGyr[1] - gyrBias[1]
         gyrCorr[2] = latestGyr[2] - gyrBias[2]
 
+        // [P33-A1] LPF 적용 (bias 차감된 값에 대해, 네트워크 입력용)
+        // 채널 인덱스: 0..2 = linAcc x/y/z, 3..5 = gyr x/y/z
+        val linAccLpf = FloatArray(3)
+        linAccLpf[0] = lpfStep(0, linAccCorr[0])
+        linAccLpf[1] = lpfStep(1, linAccCorr[1])
+        linAccLpf[2] = lpfStep(2, linAccCorr[2])
+        val gyrLpf = FloatArray(3)
+        gyrLpf[0] = lpfStep(3, gyrCorr[0])
+        gyrLpf[1] = lpfStep(4, gyrCorr[1])
+        gyrLpf[2] = lpfStep(5, gyrCorr[2])
+
         val sample = ImuSample(
-            ts_us  = tsUs,
-            acc    = latestAcc.clone(),
-            gyr    = gyrCorr,
-            linAcc = linAccCorr
+            ts_us      = tsUs,
+            acc        = latestAcc.clone(),  // RAW (gravity 포함) → EKF propagate
+            gyr        = gyrCorr,            // RAW bias 차감 후 → EKF propagate
+            linAcc     = linAccCorr,         // RAW bias 차감 후 → 진단용
+            linAccLpf  = linAccLpf,          // LPF → 네트워크 입력 (getWindow)
+            gyrLpf     = gyrLpf              // LPF → 네트워크 입력 (getWindow)
         )
 
         // ① EKF 전파 큐 (500 개 초과 시 오래된 것 제거)
@@ -335,14 +410,42 @@ class ImuCollector(context: Context) : SensorEventListener {
         val recent = snap.takeLast(WINDOW_SIZE)
         val flat = FloatArray(CHANNEL_NUM * WINDOW_SIZE)
         for ((t, s) in recent.withIndex()) {
-            flat[0 * WINDOW_SIZE + t] = s.linAcc[0]   // ch 0: linear acc x
-            flat[1 * WINDOW_SIZE + t] = s.linAcc[1]   // ch 1: linear acc y
-            flat[2 * WINDOW_SIZE + t] = s.linAcc[2]   // ch 2: linear acc z
-            flat[3 * WINDOW_SIZE + t] = s.gyr[0]      // ch 3: gyr x
-            flat[4 * WINDOW_SIZE + t] = s.gyr[1]      // ch 4: gyr y
-            flat[5 * WINDOW_SIZE + t] = s.gyr[2]      // ch 5: gyr z
+            // [P33-A1] 네트워크 입력은 LPF 버전 사용 (iPhone Core Motion 흉내)
+            // propagate 는 다른 경로 (drainPropagateQueue → s.acc / s.gyr RAW) 이므로 영향 없음
+            flat[0 * WINDOW_SIZE + t] = s.linAccLpf[0]   // ch 0: linear acc x (LPF)
+            flat[1 * WINDOW_SIZE + t] = s.linAccLpf[1]   // ch 1: linear acc y (LPF)
+            flat[2 * WINDOW_SIZE + t] = s.linAccLpf[2]   // ch 2: linear acc z (LPF)
+            flat[3 * WINDOW_SIZE + t] = s.gyrLpf[0]      // ch 3: gyr x (LPF)
+            flat[4 * WINDOW_SIZE + t] = s.gyrLpf[1]      // ch 4: gyr y (LPF)
+            flat[5 * WINDOW_SIZE + t] = s.gyrLpf[2]      // ch 5: gyr z (LPF)
         }
         return Pair(flat, recent.first().ts_us)
+    }
+
+    /**
+     * [P41] raw gyr (P21 bias 차감 후, LPF 미적용) 만 channel-major FloatArray(300) 로 반환.
+     *
+     * R_all[t] 자이로 적분 처리용 — Python `_get_imu_samples_for_network` 의 `net_gyr` 와 동등.
+     * getWindow() 는 LPF 적용된 gyrLpf 반환 (네트워크 입력용). 자이로 적분에는 LPF 가
+     * 위상 지연 + 진폭 감쇠로 누적 오차 야기하므로 *raw (P21 후, LPF 전)* 사용이 정확.
+     *
+     * 주의: 여기 반환되는 gyr 는 *이미 P21 정적 bias 차감*된 상태. R_all[t] 사용 시
+     * EKF s_bg 추가 차감 *금지* (이중 차감 발산 야기, P41 세션에서 검증됨).
+     *
+     * 채널: ch 0 gx, ch 1 gy, ch 2 gz (rad/s)
+     * @return FloatArray[3 × WINDOW_SIZE] or null (윈도우 미충족 시)
+     */
+    fun getRawGyrWindow(): FloatArray? {
+        val snap = ringBuffer.toArray().filterIsInstance<ImuSample>()
+        if (snap.size < WINDOW_SIZE) return null
+        val recent = snap.takeLast(WINDOW_SIZE)
+        val flat = FloatArray(3 * WINDOW_SIZE)
+        for ((t, s) in recent.withIndex()) {
+            flat[0 * WINDOW_SIZE + t] = s.gyr[0]
+            flat[1 * WINDOW_SIZE + t] = s.gyr[1]
+            flat[2 * WINDOW_SIZE + t] = s.gyr[2]
+        }
+        return flat
     }
 
     /** 가장 최근 샘플 (EKF 초기화, 타임스탬프 참조용) */
