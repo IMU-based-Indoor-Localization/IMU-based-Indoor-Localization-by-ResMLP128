@@ -28,10 +28,13 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ImuLocal">
 
-        <!-- 네이버 지도 Client ID — API 키 발급 후 YOUR_NAVER_CLIENT_ID 를 실제 값으로 교체 -->
+        <!-- 네이버 지도 NCP Key ID (신 콘솔 console.ncloud.com/maps/application 발급)
+             ※ 옛 콘솔 (naver-service/application) 키는 meta-data 이름이 CLIENT_ID 였으나
+                새 콘솔 키는 NCP_KEY_ID 이름을 사용해야 함. 둘 혼용 시 401 UnauthorizedClient.
+             ※ 키 노출 우려 시 local.properties + manifestPlaceholders 방식으로 이전 권장. -->
         <meta-data
-            android:name="com.naver.maps.map.CLIENT_ID"
-            android:value="YOUR_NAVER_CLIENT_ID" />
+            android:name="com.naver.maps.map.NCP_KEY_ID"
+            android:value="f7cl8uy1mq" />
 
         <activity
             android:name=".MainActivity"
