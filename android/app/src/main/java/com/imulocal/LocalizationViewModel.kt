@@ -712,7 +712,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         val result = try {
             inferEngine.infer(worldWindow)
         } catch (e: Exception) {
-            Log.w(TAG, "異붾줎 ?ㅽ뙣: ${e.message}")
+            Log.e(TAG, "추론 예외 (catch) [${e.javaClass.simpleName}]: ${e.message}")
             return
         }
         val inferLatency = System.currentTimeMillis() - inferStart

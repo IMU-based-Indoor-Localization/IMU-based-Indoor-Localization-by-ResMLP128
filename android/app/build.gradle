@@ -16,6 +16,10 @@ android {
     namespace 'com.imulocal'
     compileSdk 34
 
+    aaptOptions {
+        noCompress "ptl", "pt"   // PyTorch 모델은 압축하지 않음 (LiteModuleLoader 직접 mmap)
+    }
+
     defaultConfig {
         applicationId "com.imulocal"
         minSdk 26                   // Android 8.0+ (IMU API 안정)

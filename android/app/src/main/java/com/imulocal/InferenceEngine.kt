@@ -75,18 +75,32 @@ class InferenceEngine(private val context: Context) {
             longArrayOf(1L, INPUT_CHANNEL.toLong(), INPUT_LEN.toLong())
         )
 
-        // 추론  ── forward() 는 IValue 를 받음, Tensor 직접 전달 불가
-        val output = module!!.forward(IValue.from(inputTensor))
+        // 추론 — forward() 실패 시 fallback 결과 반환
+        val output = try {
+            module!!.forward(IValue.from(inputTensor))
+        } catch (e: Exception) {
+            Log.e(TAG, "forward() 실패 (모델 shape 불일치 등): ${e.javaClass.simpleName}: ${e.message}")
+            return InferenceResult.fallback()
+        }
 
-        // 출력 파싱 (IValue tuple → 3개의 Tensor)
-        val tuple = output.toTuple()
-        val disp    = tuple[0].toTensor().dataAsFloatArray   // [3]
-        val dispCov = tuple[1].toTensor().dataAsFloatArray   // [3]
-        val clsProb = tuple[2].toTensor().dataAsFloatArray   // [7]
-
-        val topClass = clsProb.indices.maxByOrNull { clsProb[it] } ?: -1
-
-        return InferenceResult(disp, dispCov, clsProb, topClass)
+        // 출력 파싱 — 모델 출력 개수에 따라 유연하게 처리
+        return try {
+            val tuple   = output.toTuple()
+            val disp    = tuple.getOrNull(0)?.toTensor()?.dataAsFloatArray ?: FloatArray(OUTPUT_DISP)
+            val dispCov = tuple.getOrNull(1)?.toTensor()?.dataAsFloatArray ?: FloatArray(OUTPUT_COV) { 1f }
+            // 모델이 분류 출력을 포함하지 않는 경우 기본값(handheld=1.0) 사용
+            val clsProb = if (tuple.size >= 3) {
+                tuple[2].toTensor().dataAsFloatArray
+            } else {
+                Log.w(TAG, "모델 출력이 ${tuple.size}개 — clsProb 기본값(handheld) 사용")
+                FloatArray(OUTPUT_CLS).also { it[2] = 1.0f }  // index 2 = handheld
+            }
+            val topClass = clsProb.indices.maxByOrNull { clsProb[it] } ?: -1
+            InferenceResult(disp, dispCov, clsProb, topClass)
+        } catch (e: Exception) {
+            Log.e(TAG, "출력 파싱 실패: ${e.javaClass.simpleName}: ${e.message}")
+            InferenceResult.fallback()
+        }
     }
 
     // ── 정규화 파라미터 로드 ─────────────────────────────────────
@@ -112,12 +126,13 @@ class InferenceEngine(private val context: Context) {
     // ── 유틸: assets → 캐시 복사 ───────────────────────────────
     private fun copyAssetToCache(assetName: String): File {
         val file = File(context.cacheDir, assetName)
-        if (file.exists()) return file
+        // 항상 새로 복사 — 압축 asset은 openFd()로 크기 비교 불가
         context.assets.open(assetName).use { input ->
             FileOutputStream(file).use { output ->
                 input.copyTo(output)
             }
         }
+        Log.i(TAG, "Asset copied to cache: $assetName (${file.length()} bytes)")
         return file
     }
 
@@ -141,6 +156,14 @@ data class InferenceResult(
         // 0=handbag 1=handheld 2=pocket 3=running 4=slow_walk 5=trolley 6=unknown
         val CLASS_NAMES = listOf(
             "handbag", "handheld", "pocket", "running", "slow_walk", "trolley", "unknown"
+        )
+
+        /** 추론 실패 시 EKF update 를 건너뛸 수 있도록 zero displacement + high cov 반환 */
+        fun fallback() = InferenceResult(
+            disp     = FloatArray(3),               // [0, 0, 0] — 이동 없음
+            dispCov  = FloatArray(3) { 1e6f },      // 매우 큰 불확실도 → EKF 가중치 ≈ 0
+            clsProb  = FloatArray(7).also { it[6] = 1.0f },  // unknown (index 6)
+            topClass = 6
         )
     }
 }
