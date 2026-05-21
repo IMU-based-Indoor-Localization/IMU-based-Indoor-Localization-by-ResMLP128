@@ -140,7 +140,7 @@ def forward_safe(model, x: np.ndarray):
     """x: (6, 100) numpy → tensor [1, 6, 100] → forward. 결과 + 예외 string 반환."""
     xt = torch.from_numpy(x).unsqueeze(0).float()
     try:
-        return model(xt), None
+        return model.run_method("forward", (xt,)), None
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
@@ -194,7 +194,7 @@ def main() -> int:
             print(f"{mpath:<48s} | (파일 없음)")
             continue
         try:
-            model = torch._C._load_for_lite_interpreter(mpath)
+            model = torch._C._load_for_lite_interpreter(mpath, torch.device("cpu"))
         except Exception as e:
             print(f"{mpath:<48s} | (로드 실패: {type(e).__name__})")
             continue

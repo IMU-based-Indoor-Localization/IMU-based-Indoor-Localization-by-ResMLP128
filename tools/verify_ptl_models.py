@@ -101,7 +101,7 @@ def main() -> int:
         size_kb = os.path.getsize(path) / 1024
         print(f"  size: {size_kb:.1f} KB")
         try:
-            m = torch._C._load_for_lite_interpreter(path)
+            m = torch._C._load_for_lite_interpreter(path, torch.device("cpu"))
         except Exception:
             print("  로드 실패:")
             traceback.print_exc(limit=3)
@@ -111,7 +111,7 @@ def main() -> int:
 
         # forward 1
         try:
-            out1 = m(x_rand)
+            out1 = m.run_method("forward", (x_rand,))
         except Exception:
             print("  forward(random) 실패:")
             traceback.print_exc(limit=3)
@@ -126,9 +126,9 @@ def main() -> int:
 
         # determinism
         try:
-            out2 = m(x_rand)
+            out2 = m.run_method("forward", (x_rand,))
             diffs = out_diff(out1, out2)
-            print(f"  same input twice — max diff per output: {diffs}")
+            print(f"  same input twice -- max diff per output: {diffs}")
             if any(d > 1e-5 for d in diffs):
                 print("    !!! non-deterministic (BatchNorm not in eval mode?)")
         except Exception:
@@ -137,7 +137,7 @@ def main() -> int:
 
         # zero input
         try:
-            out_z = m(x_zero)
+            out_z = m.run_method("forward", (x_zero,))
             print(f"  forward(zeros): {value_summary(out_z)}")
         except Exception:
             print("  forward(zeros) 실패:")
