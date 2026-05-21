@@ -47,7 +47,7 @@ class InferenceEngine(private val context: Context) {
         //
         // 토글 OFF: 기존 동작 (linAcc m/s² 그대로 normalize).
         // 토글 ON:  학습 분포 매칭 시도.
-        private const val USE_OOD_FIX = true
+        private const val USE_OOD_FIX = false  // P46-B: A/B 비교용 — true(OOD ON)에서 unknown 88% 악화 확인 → /9.81 미적용으로 재측정
         private const val GRAVITY = 9.81f
     }
 
