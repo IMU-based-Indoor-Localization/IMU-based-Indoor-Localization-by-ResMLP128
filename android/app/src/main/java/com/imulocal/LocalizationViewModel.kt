@@ -269,6 +269,45 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         private const val JUMP_GATE_POS_M = 1.5
         /** window 내 raw linAcc body frame magnitude peak 임계 (m/s²). 정상 보행 peak ≤ 8. */
         private const val JUMP_GATE_ACC_PEAK = 8.0
+
+        // ────────────────────────────────────────────────────────────
+        // [P53] RotVec Dead-Reckoning — EKF 우회, 모델 disp 직접 적분
+        //
+        // 오프라인 하니스(src/Network/offline_eval.py) 결론:
+        //   - 모델 자체는 정상 — window당 |disp_xy| 0.3~0.55m, OxIOD RMSE 0.89m 로 검증.
+        //   - "8~13배 과대추정"(P51 전제)은 모델이 아니라 EKF 내부 발산 (yaw drift → 측정 OoD).
+        //   - 모델 출력만 적분한 dead-reckoning → 경로 8~9m(실제 10m), 종점 폐합 ~1m. 정상.
+        //
+        // USE_ROTVEC_DR=true 동작:
+        //   - EKF 클론/update 완전 우회 (propagate 는 무관하게 진행하나 위치엔 미사용).
+        //   - 입력 프레임 변환: TYPE_ROTATION_VECTOR 절대 회전행렬을 per-timestep 으로 사용.
+        //     EKF clone rotation 의 yaw drift 와 분리 — 하니스 'ga' frame 과 동일 변환.
+        //   - 입력 = getRawWindow() (LPF 미적용 raw). 하니스 입력 분포와 정합.
+        //   - 1초 비겹침 윈도우마다 1회 모델 disp 를 RotVec 시작 yaw 로 월드 회전 후 누적.
+        //     (20Hz 겹침 윈도우를 매번 누적하면 ~20배 과적분 → 비겹침 1Hz 누적 필수.)
+        //
+        // 토글 OFF: 기존 EKF 경로 (runInferStep 의 클론/update 흐름).
+        // const 가 아닌 val — runInferStep 조기 return 이후 코드의 unreachable 경고 회피.
+        private val USE_ROTVEC_DR = true
+
+        // ────────────────────────────────────────────────────────────
+        // [P54] PDR-hybrid — 모델은 크기, 방향은 rotVec heading
+        //
+        // latest.csv 진단 (5m 왕복): 모델 disp 의 *크기*(보행 에너지)는 강건하나
+        // *방향* 은 Android OoD 로 흩어져 재구성이 랜덤워크화 (구간별 순변위
+        // 0.8m·2.2m, 기대 5m·5m). OxIOD 에선 방향 정상(349m RMSE 0.89m) →
+        // 방향 단서가 도메인 갭에 취약.
+        //
+        // USE_PDR_HEADING=true 시: 모델 출력에서 |disp_xy|(크기) 만 취하고,
+        // 진행 방향은 TYPE_ROTATION_VECTOR heading(자력계 융합 절대 방위) 사용.
+        // 전진 보행 가정 (heading 방향으로 |disp| 만큼 이동).
+        //   - handheld(폰을 진행 방향으로 들고 보행) 시나리오에 적합.
+        //   - 윈도우 내 heading 변화가 큰 '제자리 회전' 윈도우는 병진 0 으로 누적 제외.
+        //
+        // 토글 OFF: P53 순수 모델 DR (방향도 모델 disp 사용 — 랜덤워크화).
+        private val USE_PDR_HEADING = true
+        /** 윈도우 내 heading 변화가 이 값(°) 초과면 제자리 회전으로 보고 누적 제외. */
+        private const val TURN_YAW_THRESH_DEG = 60.0
     }
 
     // ?? ?섏〈 而댄룷?뚰듃 ????????????????????????????????????????????
@@ -313,6 +352,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     private var netPosY = 0.0
     /** 직전 추론에서 EKF 모드였는지 — 모드 전환 시 _net_pos 재동기화용. */
     private var prevUsedEkfUpdate = true
+
+    /** [P53] RotVec DR: 마지막으로 누적 처리한 비겹침 윈도우의 끝 ts (μs). -1 = 미시작. */
+    private var lastDrEndTs: Long = -1L
 
     // ?? [?꾩씠?붿뼱 3] Hysteresis ?곹깭 癒몄떊 ????????????????????????????
     private enum class MotionState { STATIC, MOVING }
@@ -546,6 +588,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         netPosX = 0.0
         netPosY = 0.0
         prevUsedEkfUpdate = true
+        // [P53] RotVec DR 게이트 초기화
+        lastDrEndTs = -1L
         // [?꾩씠?붿뼱 3] ?곹깭 癒몄떊 珥덇린??
         motionState          = MotionState.STATIC
         staticCandidateCount = 0
@@ -571,6 +615,12 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     private suspend fun runInferStep(localCloneHistory: ArrayDeque<Long>) {
         if (!EkfBridge.isInitialized()) return
         if (!inferEngine.isLoaded())    return
+
+        // [P53] RotVec dead-reckoning 경로 — EKF 클론/update 흐름 완전 우회.
+        if (USE_ROTVEC_DR) {
+            runRotVecDrStep()
+            return
+        }
 
         // ??異붾줎 ?덈룄???뺣낫 (理쒖냼 100 ?섑뵆 ?꾩슂)
         val (window, _) = imuCollector.getWindow() ?: return
@@ -996,6 +1046,167 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             inferLatency      = inferLatency
         )
     }
+    // ── [P53] RotVec Dead-Reckoning 스텝 ──────────────────────────
+    /**
+     * EKF 를 우회하고 모델 disp 를 RotVec 절대 자세 기준으로 직접 적분한다.
+     *
+     * 오프라인 하니스(offline_eval.py)의 reconstruct() 를 단말에서 그대로 재현:
+     *  1. 1초 비겹침 윈도우 게이트 (20Hz 겹침 누적 시 ~20배 과적분 방지)
+     *  2. raw 6채널 window + per-timestep RotVec 회전행렬 확보
+     *  3. transformWindowRotVec → gravity-aligned 입력 (학습 frame='ga' 동일)
+     *  4. 모델 추론 → disp (ga frame)
+     *  5. disp[xy] 를 윈도우 시작 RotVec 절대 yaw 로 월드 회전 → netPos 누적
+     */
+    private fun runRotVecDrStep() {
+        val latestTs = imuCollector.getLatestSample()?.ts_us ?: return
+
+        // 1초 비겹침 게이트 — 마지막 누적 이후 한 윈도우 분량(≈1s) 경과해야 처리
+        if (lastDrEndTs < 0L) { lastDrEndTs = latestTs; return }
+        if (latestTs - lastDrEndTs < WINDOW_DURATION_US) return
+
+        val window  = imuCollector.getRawWindow()    ?: return
+        val rotMats = imuCollector.getRotMatWindow() ?: return
+        lastDrEndTs = latestTs
+
+        // 정적 윈도우 → 누적 생략 (netPos 유지). 다음 윈도우는 게이트로 fresh 보장.
+        val dynamicFrac = computeDynamicFraction(window)
+        if (dynamicFrac < MIN_DYNAMIC_FRACTION) {
+            Log.v(TAG, "[DR] 정적 윈도우 (dynFrac=${"%.2f".format(dynamicFrac)}) — 누적 생략")
+            return
+        }
+
+        // 윈도우 시작/끝/중앙 heading (rotVec 절대 방위) + 윈도우 내 heading 변화
+        val ws = ImuCollector.WINDOW_SIZE
+        fun headingAt(t: Int) =
+            atan2(rotMats[t * 9 + 3].toDouble(), rotMats[t * 9].toDouble())
+        val yawStart = headingAt(0)
+        val yawMid   = headingAt(ws / 2)
+        var yawSpan  = headingAt(ws - 1) - yawStart
+        while (yawSpan >  Math.PI) yawSpan -= 2.0 * Math.PI
+        while (yawSpan < -Math.PI) yawSpan += 2.0 * Math.PI
+
+        // [P54] 제자리 회전 윈도우 → 병진 없음으로 보고 누적 생략
+        if (USE_PDR_HEADING && Math.toDegrees(abs(yawSpan)) > TURN_YAW_THRESH_DEG) {
+            Log.i(TAG, "[DR] 회전 윈도우 (Δyaw=${"%.0f".format(Math.toDegrees(yawSpan))}°)" +
+                    " — 병진 0, 누적 생략")
+            return
+        }
+
+        // RotVec per-timestep gravity-aligned 변환 + 추론
+        val worldWindow = transformWindowRotVec(window, rotMats)
+        val inferStart  = System.currentTimeMillis()
+        val result = try {
+            inferEngine.infer(worldWindow)
+        } catch (e: Exception) {
+            Log.e(TAG, "[DR] 추론 예외: ${e.javaClass.simpleName}: ${e.message}")
+            return
+        }
+        val inferLatency = System.currentTimeMillis() - inferStart
+
+        val d0  = result.disp[0].toDouble()
+        val d1  = result.disp[1].toDouble()
+        val mag = sqrt(d0 * d0 + d1 * d1)
+
+        val dxWorld: Double
+        val dyWorld: Double
+        if (USE_PDR_HEADING) {
+            // [P54] 모델은 크기만 — 방향은 rotVec heading(윈도우 중앙), 전진 가정.
+            dxWorld = mag * cos(yawMid)
+            dyWorld = mag * sin(yawMid)
+        } else {
+            // [P53] 모델 disp 벡터를 윈도우 시작 yaw 로 회전 (방향도 모델 사용).
+            dxWorld = cos(yawStart) * d0 - sin(yawStart) * d1
+            dyWorld = sin(yawStart) * d0 + cos(yawStart) * d1
+        }
+
+        netPosX += dxWorld
+        netPosY += dyWorld
+
+        Log.i(TAG, "[DR] cls=${result.topClass}(${result.className}) " +
+                "|disp|=${"%.3f".format(mag)} " +
+                "head=${"%.1f".format(Math.toDegrees(yawMid))}° " +
+                "dWorld=[${"%.3f".format(dxWorld)}, ${"%.3f".format(dyWorld)}] " +
+                "netPos=[${"%.2f".format(netPosX)}, ${"%.2f".format(netPosY)}]")
+
+        // 모델 only 궤적도 동일 누적 (DR 에서는 trackPoints 와 동일)
+        modelPosX = netPosX
+        modelPosY = netPosY
+
+        // UI 갱신 — 워밍업 이후에만 trackPoints 추가
+        val elapsedMs = System.currentTimeMillis() - startTimeMs
+        if (elapsedMs >= WARMUP_DURATION_MS) {
+            trackPoints.add(Pair(netPosX, netPosY))
+            if (trackPoints.size > 5000) trackPoints.removeAt(0)
+            modelTrackPoints.add(Pair(modelPosX, modelPosY))
+            if (modelTrackPoints.size > 5000) modelTrackPoints.removeAt(0)
+        }
+        _state.value = _state.value.copy(
+            position          = Triple(netPosX, netPosY, 0.0),
+            posStd            = Triple(0.0, 0.0, 0.0),
+            velocity          = Triple(dxWorld, dyWorld, 0.0),  // 1초 윈도우 → m/s 근사
+            carryMode         = result.className,
+            carryProb         = result.clsProb.maxOrNull() ?: 0f,
+            trackPoints       = trackPoints.toList(),
+            modelTrackPoints  = modelTrackPoints.toList(),
+            inferLatency      = inferLatency
+        )
+    }
+
+    // ── [P53] RotVec per-timestep gravity-aligned 프레임 변환 ──────
+    /**
+     * window 6채널(body frame linAcc+gyr)을 RotVec 절대 회전행렬로 gravity-aligned
+     * world frame 으로 변환. 학습 dataset.py `_window_to_gravity_aligned`(frame='ga') 와 동일:
+     *   v_ga[t] = R_yaw_inv · R_rotvec[t] · v_body[t]
+     *   R_yaw_inv = R_z(-yaw0),  yaw0 = window 시작 RotVec yaw
+     *
+     * EKF clone rotation 기반 transformWindowToWorldFrame 과 달리 자력계 융합 절대
+     * 자세를 쓰므로 yaw drift 가 없다 (하니스 'ga' frame 과 정확히 동일).
+     *
+     * @param window  channel-major FloatArray[6 × WINDOW_SIZE] (ch0-2 linAcc, ch3-5 gyr)
+     * @param rotMats channel-major FloatArray[9 × WINDOW_SIZE] — rotMat[t]=flat[t*9 .. t*9+8]
+     */
+    private fun transformWindowRotVec(window: FloatArray, rotMats: FloatArray): FloatArray {
+        val ws  = ImuCollector.WINDOW_SIZE
+        val out = FloatArray(window.size)
+
+        // 윈도우 시작 yaw 제거: R_yaw_inv = R_z(-yaw0)
+        val yaw0 = atan2(rotMats[3].toDouble(), rotMats[0].toDouble())
+        val cosZ = cos(yaw0)
+        val sinZ = sin(yaw0)
+
+        for (t in 0 until ws) {
+            val b = t * 9
+            val r0 = rotMats[b].toDouble();     val r1 = rotMats[b + 1].toDouble(); val r2 = rotMats[b + 2].toDouble()
+            val r3 = rotMats[b + 3].toDouble(); val r4 = rotMats[b + 4].toDouble(); val r5 = rotMats[b + 5].toDouble()
+            val r6 = rotMats[b + 6].toDouble(); val r7 = rotMats[b + 7].toDouble(); val r8 = rotMats[b + 8].toDouble()
+
+            // M = R_yaw_inv · R   (R_yaw_inv = [[cosZ, sinZ, 0], [-sinZ, cosZ, 0], [0, 0, 1]])
+            val m00 =  cosZ * r0 + sinZ * r3
+            val m01 =  cosZ * r1 + sinZ * r4
+            val m02 =  cosZ * r2 + sinZ * r5
+            val m10 = -sinZ * r0 + cosZ * r3
+            val m11 = -sinZ * r1 + cosZ * r4
+            val m12 = -sinZ * r2 + cosZ * r5
+            val m20 = r6; val m21 = r7; val m22 = r8
+
+            // linAcc (ch 0-2)
+            val lx = window[0 * ws + t].toDouble()
+            val ly = window[1 * ws + t].toDouble()
+            val lz = window[2 * ws + t].toDouble()
+            out[0 * ws + t] = (m00 * lx + m01 * ly + m02 * lz).toFloat()
+            out[1 * ws + t] = (m10 * lx + m11 * ly + m12 * lz).toFloat()
+            out[2 * ws + t] = (m20 * lx + m21 * ly + m22 * lz).toFloat()
+            // gyr (ch 3-5)
+            val gx = window[3 * ws + t].toDouble()
+            val gy = window[4 * ws + t].toDouble()
+            val gz = window[5 * ws + t].toDouble()
+            out[3 * ws + t] = (m00 * gx + m01 * gy + m02 * gz).toFloat()
+            out[4 * ws + t] = (m10 * gx + m11 * gy + m12 * gz).toFloat()
+            out[5 * ws + t] = (m20 * gx + m21 * gy + m22 * gz).toFloat()
+        }
+        return out
+    }
+
     // ── 헬퍼: 시작 클론 탐색 ─────────────────────────────────────
     /**
      * localCloneHistory 에서 (tEndUs - WINDOW_DURATION_US) 에 가장 가까운 항목 반환.

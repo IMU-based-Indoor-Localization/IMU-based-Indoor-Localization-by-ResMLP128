@@ -85,6 +85,9 @@ class ImuCollector(context: Context) : SensorEventListener {
      * @param linAcc    TYPE_LINEAR_ACCELERATION [lx, ly, lz] m/s² (RAW — bias 차감 후)
      * @param linAccLpf [P33-A1] linAcc 의 Butterworth fc=12Hz LPF 버전 (네트워크 입력용)
      * @param gyrLpf    [P33-A1] gyr 의 Butterworth fc=12Hz LPF 버전 (네트워크 입력용)
+     * @param rotMat    [P53] 샘플 시점 TYPE_ROTATION_VECTOR 회전행렬 (device→world, row-major 9).
+     *                  RotVec dead-reckoning 의 per-timestep gravity-aligned 변환에 사용.
+     *                  rotVec 미수신 시 단위행렬.
      */
     data class ImuSample(
         val ts_us:     Long,
@@ -92,7 +95,8 @@ class ImuCollector(context: Context) : SensorEventListener {
         val gyr:       FloatArray,   // [gx, gy, gz]  rad/s RAW                     → EKF
         val linAcc:    FloatArray,   // [lx, ly, lz]  m/s²  RAW (no gravity)        → 진단용
         val linAccLpf: FloatArray,   // [lx, ly, lz]  m/s²  LPF                     → 네트워크
-        val gyrLpf:    FloatArray    // [gx, gy, gz]  rad/s LPF                     → 네트워크
+        val gyrLpf:    FloatArray,   // [gx, gy, gz]  rad/s LPF                     → 네트워크
+        val rotMat:    FloatArray    // [9] device→world 회전행렬 (row-major)        → RotVec DR
     )
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -120,6 +124,16 @@ class ImuCollector(context: Context) : SensorEventListener {
      * 초기값 Float.NaN — rotVecSensor 가 없거나 아직 수신 전이면 NaN 유지.
      */
     @Volatile private var latestYawRad: Float = Float.NaN
+
+    /**
+     * [P53] 최신 TYPE_ROTATION_VECTOR 회전행렬 (device→world, row-major 9-element).
+     *
+     * RotVec dead-reckoning 의 per-timestep gravity-aligned 프레임 변환에 사용.
+     * 자력계 융합 절대 자세 → yaw drift 없음 (EKF clone rotation 과 달리).
+     * 초기값 단위행렬 — rotVec 미수신 구간에서는 회전 없음(body frame) 으로 graceful degrade.
+     */
+    @Volatile private var latestRotMat: FloatArray =
+        floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)
 
     /**
      * [P11] TYPE_ROTATION_VECTOR 지자기계 정확도.
@@ -224,6 +238,7 @@ class ImuCollector(context: Context) : SensorEventListener {
         latestGyrTs   = -1L
         latestLinAcc  = FloatArray(3)
         latestYawRad  = Float.NaN
+        latestRotMat  = floatArrayOf(1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)  // [P53] 단위행렬 초기화
         rotVecAccuracy = 0  // 재시작 시 UNRELIABLE 로 초기화
         propagateQueue.clear()
         ringBuffer.clear()
@@ -353,6 +368,8 @@ class ImuCollector(context: Context) : SensorEventListener {
                 // yaw = atan2(R[1,0], R[0,0])  (EKF 와 동일한 ZYX Euler yaw 공식)
                 //   rotMat[row*3+col] → R[1,0]=rotMat[3], R[0,0]=rotMat[0]
                 latestYawRad = Math.atan2(rotMat[3].toDouble(), rotMat[0].toDouble()).toFloat()
+                // [P53] RotVec dead-reckoning 용 전체 회전행렬 보관 (device→world).
+                latestRotMat = rotMat
             }
         }
 
@@ -416,7 +433,8 @@ class ImuCollector(context: Context) : SensorEventListener {
             gyr        = gyrCorr,            // RAW bias 차감 후 → EKF propagate
             linAcc     = linAccCorr,         // RAW bias 차감 후 → 진단용
             linAccLpf  = linAccLpf,          // LPF → 네트워크 입력 (getWindow)
-            gyrLpf     = gyrLpf              // LPF → 네트워크 입력 (getWindow)
+            gyrLpf     = gyrLpf,             // LPF → 네트워크 입력 (getWindow)
+            rotMat     = latestRotMat        // [P53] 샘플 시점 회전행렬 → RotVec DR
         )
 
         // ① EKF 전파 큐 (500 개 초과 시 오래된 것 제거)
@@ -500,6 +518,53 @@ class ImuCollector(context: Context) : SensorEventListener {
             flat[0 * WINDOW_SIZE + t] = s.gyr[0]
             flat[1 * WINDOW_SIZE + t] = s.gyr[1]
             flat[2 * WINDOW_SIZE + t] = s.gyr[2]
+        }
+        return flat
+    }
+
+    /**
+     * [P53] 최근 WINDOW_SIZE 샘플을 LPF 미적용 raw 6채널 window 로 반환.
+     *
+     * getWindow() 는 12Hz Butterworth LPF 버전(linAccLpf/gyrLpf)을 반환하나, RotVec
+     * dead-reckoning 은 오프라인 하니스(offline_eval.py)와 입력 분포를 정합시키기 위해
+     * raw linAcc/gyr 를 사용한다 — 하니스가 검증한 입력 = CSV raw linAcc/gyr.
+     * 둘 다 P21 정적 bias 차감은 완료된 상태.
+     *
+     * 채널: ch0-2 linAcc(raw), ch3-5 gyr(raw).
+     * @return FloatArray[6 × WINDOW_SIZE] or null (윈도우 미충족 시)
+     */
+    fun getRawWindow(): FloatArray? {
+        val snap = ringBuffer.toArray().filterIsInstance<ImuSample>()
+        if (snap.size < WINDOW_SIZE) return null
+        val recent = snap.takeLast(WINDOW_SIZE)
+        val flat = FloatArray(CHANNEL_NUM * WINDOW_SIZE)
+        for ((t, s) in recent.withIndex()) {
+            flat[0 * WINDOW_SIZE + t] = s.linAcc[0]
+            flat[1 * WINDOW_SIZE + t] = s.linAcc[1]
+            flat[2 * WINDOW_SIZE + t] = s.linAcc[2]
+            flat[3 * WINDOW_SIZE + t] = s.gyr[0]
+            flat[4 * WINDOW_SIZE + t] = s.gyr[1]
+            flat[5 * WINDOW_SIZE + t] = s.gyr[2]
+        }
+        return flat
+    }
+
+    /**
+     * [P53] 최근 WINDOW_SIZE 샘플의 회전행렬을 channel-major FloatArray(9 × WINDOW_SIZE) 로 반환.
+     *
+     * RotVec dead-reckoning 의 per-timestep gravity-aligned 변환용. getWindow() 와 *동일한*
+     * takeLast(WINDOW_SIZE) 스냅샷 규칙 → 두 호출 사이 1-2 샘플 어긋남은 무시 가능 (10-20ms).
+     *
+     * 레이아웃: rotMat[t] 는 flat[t*9 .. t*9+8] (row-major device→world).
+     * @return FloatArray[9 × WINDOW_SIZE] or null (윈도우 미충족 시)
+     */
+    fun getRotMatWindow(): FloatArray? {
+        val snap = ringBuffer.toArray().filterIsInstance<ImuSample>()
+        if (snap.size < WINDOW_SIZE) return null
+        val recent = snap.takeLast(WINDOW_SIZE)
+        val flat = FloatArray(9 * WINDOW_SIZE)
+        for ((t, s) in recent.withIndex()) {
+            System.arraycopy(s.rotMat, 0, flat, t * 9, 9)
         }
         return flat
     }
