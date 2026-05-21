@@ -264,7 +264,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //   4) UI 갱신 skip (trackPoints 추가 안 함) + return
         //
         // 토글: 임계값을 1e6 으로 키워 사실상 비활성화. ablation 시 false 로 OFF.
-        private const val USE_JUMP_GATE = true
+        private const val USE_JUMP_GATE = false  // [P48-D] 비활성화: C++ MAX_INNOV_NORM 3.0m 게이트로 대체. 위치 기반 사후 게이트 → innovation 기반 사전 게이트로 전환
         /** Δekf_pos xy 임계 (m). 보행 1초 윈도우 최대 ~2m, 단일 inference (~150ms) 면 0.3m 이하 정상. */
         private const val JUMP_GATE_POS_M = 1.5
         /** window 내 raw linAcc body frame magnitude peak 임계 (m/s²). 정상 보행 peak ≤ 8. */

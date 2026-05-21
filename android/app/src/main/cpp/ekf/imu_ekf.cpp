@@ -344,7 +344,7 @@ void ScEkf::update(const Vec3& meas, const Mat3& meas_cov,
     // 통계 게이트가 쓸모없어지는 문제 해결.
     // 실내 최대속도 ~5m/s × ~1s 윈도우 = 5m → 이노베이션 > 6m 는 물리적으로 불가 → 건너뜀.
     // 좌표 변환 오류/네트워크 이상 출력으로 인한 급격한 발산 방어.
-    constexpr double MAX_INNOV_NORM = 6.0;  // m
+    constexpr double MAX_INNOV_NORM = 3.0;  // [P48-A] 6.0→3.0: 보행 1초 max 1.5m × 2 안전마진. jumpgate_007 4.946m 점프 직접 차단 목표
     if (innov.norm() > MAX_INNOV_NORM) return;
 
     // Mahalanobis gating (chi^2 임계값 11.345, ν=3, p=0.99)
