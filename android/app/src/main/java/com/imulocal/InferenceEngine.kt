@@ -47,8 +47,29 @@ class InferenceEngine(private val context: Context) {
         //
         // 토글 OFF: 기존 동작 (linAcc m/s² 그대로 normalize).
         // 토글 ON:  학습 분포 매칭 시도.
-        private const val USE_OOD_FIX = false  // P46-B: A/B 비교용 — true(OOD ON)에서 unknown 88% 악화 확인 → /9.81 미적용으로 재측정
+        private const val USE_OOD_FIX = true   // P47-OOD: jumpgate_008 norm std 학습 분포의 3-10배 → g 단위 의심. 단위 재검증
         private const val GRAVITY = 9.81f
+
+        // ─────────────────────────────────────────────────────────
+        // [P47-LPF] Butterworth 2nd-order Low-Pass Filter (anti-aliasing)
+        //
+        // 진단 (P47 FFT 분석): Android raw IMU 의 5-10Hz 대역 power 가 학습 데이터
+        //   (OxIOD = iPhone Core Motion anti-aliased) 대비 *25배* 큼 (acc z 기준).
+        //   → handheld 0% / running 22% / unknown 71% 의 OoD 원인 후보 1순위.
+        //
+        // 적용: window normalize 직전 모든 6채널에 동일 LPF 적용.
+        //       cutoff fc=5Hz, sample rate fs=100Hz, Q=1/sqrt(2) (Butterworth).
+        //       보행 fundamental (1-3Hz) 96~99% 보존, 5-10Hz 약 3배 감쇠 (Python 사전 검증).
+        //
+        // 토글 OFF: 기존 동작 (raw window 그대로 normalize).
+        // 토글 ON:  5Hz LPF 적용 후 normalize → 학습 spectral 분포 매칭 시도.
+        private const val USE_LPF = false  // P47-LPF rollback: jumpgate_008 ekf 19.6m 발산 → 가설 기각
+        // Direct Form II Transposed biquad 계수 (Python scipy butter(2, 5/50) 등가)
+        private const val LPF_B0 =  0.020083f
+        private const val LPF_B1 =  0.040167f
+        private const val LPF_B2 =  0.020083f
+        private const val LPF_A1 = -1.561018f
+        private const val LPF_A2 =  0.641352f
     }
 
     // 첫 추론 시 1회 진단 로그 출력용
@@ -70,6 +91,29 @@ class InferenceEngine(private val context: Context) {
 
     fun isLoaded() = module != null
 
+    // ── LPF (Butterworth biquad, channel-wise) ─────────────────
+    /**
+     * [P47-LPF] 6채널 window 에 동일 biquad LPF 를 적용.
+     * Direct Form II Transposed (수치 안정성). 채널별 filter state 독립.
+     * window 입력 시점마다 state 초기화 → transient ~2 sample (무시 가능).
+     */
+    private fun applyLPF(window: FloatArray): FloatArray {
+        val out = FloatArray(window.size)
+        for (ch in 0 until INPUT_CHANNEL) {
+            var s1 = 0f
+            var s2 = 0f
+            for (t in 0 until INPUT_LEN) {
+                val idx = ch * INPUT_LEN + t
+                val v = window[idx]
+                val y = LPF_B0 * v + s1
+                s1 = LPF_B1 * v - LPF_A1 * y + s2
+                s2 = LPF_B2 * v - LPF_A2 * y
+                out[idx] = y
+            }
+        }
+        return out
+    }
+
     // ── 추론 ────────────────────────────────────────────────────
     /**
      * IMU 윈도우 데이터로 추론을 실행한다.
@@ -82,42 +126,53 @@ class InferenceEngine(private val context: Context) {
         requireNotNull(module) { "모델이 로드되지 않았습니다. load() 를 먼저 호출하세요." }
         require(window.size == INPUT_CHANNEL * INPUT_LEN)
 
+        // [P47-LPF] 5Hz Butterworth LPF 를 normalize 직전에 적용 (anti-aliasing)
+        val srcWindow = if (USE_LPF) applyLPF(window) else window
+
         // [P46-OOD] linAcc /= 9.81 (channel 0-2) + 정규화
         // OOD fix OFF 시: 기존 동작 (m/s² 그대로 정규화)
         // OOD fix ON  시: linAcc 를 g 단위로 변환 후 정규화 → OxIOD 학습 분포 매칭 시도
-        val normalized = FloatArray(window.size)
+        val normalized = FloatArray(srcWindow.size)
         for (ch in 0 until INPUT_CHANNEL) {
             // channel 0-2 (linAcc) 만 9.81 로 나눔. channel 3-5 (gyr) 는 그대로.
             val unitScale = if (USE_OOD_FIX && ch < 3) GRAVITY else 1f
             for (t in 0 until INPUT_LEN) {
                 val idx = ch * INPUT_LEN + t
-                normalized[idx] = (window[idx] / unitScale - normMean[ch]) / normStd[ch]
+                normalized[idx] = (srcWindow[idx] / unitScale - normMean[ch]) / normStd[ch]
             }
         }
 
-        // 첫 추론 시 1회 진단 — 변환 전 raw 통계 vs 변환 후 normalized 통계
+        // 첫 추론 시 1회 진단 — raw vs LPF 후 vs normalized 통계
         if (!oodDiagLogged) {
             oodDiagLogged = true
             val rawMeanCh = FloatArray(INPUT_CHANNEL)
             val rawStdCh  = FloatArray(INPUT_CHANNEL)
+            val lpfMeanCh = FloatArray(INPUT_CHANNEL)
+            val lpfStdCh  = FloatArray(INPUT_CHANNEL)
             val normMeanCh = FloatArray(INPUT_CHANNEL)
             val normStdCh  = FloatArray(INPUT_CHANNEL)
             for (ch in 0 until INPUT_CHANNEL) {
                 var s = 0f; var s2 = 0f
+                var ls = 0f; var ls2 = 0f
                 var ns = 0f; var ns2 = 0f
                 for (t in 0 until INPUT_LEN) {
                     val v  = window[ch * INPUT_LEN + t]
+                    val lv = srcWindow[ch * INPUT_LEN + t]
                     val nv = normalized[ch * INPUT_LEN + t]
                     s += v;   s2 += v * v
+                    ls += lv; ls2 += lv * lv
                     ns += nv; ns2 += nv * nv
                 }
                 rawMeanCh[ch]  = s / INPUT_LEN
                 rawStdCh[ch]   = kotlin.math.sqrt((s2 / INPUT_LEN - rawMeanCh[ch] * rawMeanCh[ch]).coerceAtLeast(0f))
+                lpfMeanCh[ch]  = ls / INPUT_LEN
+                lpfStdCh[ch]   = kotlin.math.sqrt((ls2 / INPUT_LEN - lpfMeanCh[ch] * lpfMeanCh[ch]).coerceAtLeast(0f))
                 normMeanCh[ch] = ns / INPUT_LEN
                 normStdCh[ch]  = kotlin.math.sqrt((ns2 / INPUT_LEN - normMeanCh[ch] * normMeanCh[ch]).coerceAtLeast(0f))
             }
-            Log.i(TAG, "[P46-OOD-DIAG] USE_OOD_FIX=$USE_OOD_FIX  (linAcc /9.81 ch 0-2)")
+            Log.i(TAG, "[P47-DIAG] USE_OOD_FIX=$USE_OOD_FIX  USE_LPF=$USE_LPF (fc=5Hz, fs=100Hz)")
             Log.i(TAG, "  raw  mean=${rawMeanCh.toList().map { "%.4f".format(it) }}  std=${rawStdCh.toList().map { "%.4f".format(it) }}")
+            Log.i(TAG, "  lpf  mean=${lpfMeanCh.toList().map { "%.4f".format(it) }}  std=${lpfStdCh.toList().map { "%.4f".format(it) }}  (LPF 후 — 5-10Hz 감쇠)")
             Log.i(TAG, "  norm mean=${normMeanCh.toList().map { "%.4f".format(it) }}  std=${normStdCh.toList().map { "%.4f".format(it) }}  (≈0 / ≈1 면 학습 분포 매칭)")
         }
 
