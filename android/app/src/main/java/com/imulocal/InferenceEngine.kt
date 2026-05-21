@@ -47,7 +47,7 @@ class InferenceEngine(private val context: Context) {
         //
         // 토글 OFF: 기존 동작 (linAcc m/s² 그대로 normalize).
         // 토글 ON:  학습 분포 매칭 시도.
-        private const val USE_OOD_FIX = true   // P47-OOD: jumpgate_008 norm std 학습 분포의 3-10배 → g 단위 의심. 단위 재검증
+        private const val USE_OOD_FIX = false  // P47-OOD rollback: norm std 매칭 성공(1.06)했으나 실측 ekf 5.75m로 악화 → 단위 fix 단독으로 부족. P47-D (R=10) baseline 유지
         private const val GRAVITY = 9.81f
 
         // ─────────────────────────────────────────────────────────
