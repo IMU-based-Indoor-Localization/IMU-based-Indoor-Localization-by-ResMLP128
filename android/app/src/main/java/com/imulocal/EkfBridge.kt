@@ -70,7 +70,7 @@ object EkfBridge {
         15.0,   // 0 handbag    — 진자 운동, 중간↑
         10.0,   // 1 handheld   — 기준값 (Python batch_runner 기본값)
          5.0,   // 2 pocket     — 안정적, 측정 신뢰 ↓
-        50.0,   // 3 running    — 격한 움직임, 측정 불신 ↑↑
+        10.0,   // 3 running    — [P47-D] 50→10 (handheld 기준값 동일). 도보가 running 으로 분류되어도 측정 신뢰 회복
          5.0,   // 4 slow_walk  — 매우 규칙적, 측정 신뢰 ↓
          7.0,   // 5 trolley    — 기계적 안정, 측정 약간 신뢰 ↓
        100.0    // 6 unknown    — 분류 불가, 보수적 ↑↑↑
