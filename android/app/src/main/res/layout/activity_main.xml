@@ -186,6 +186,16 @@
                     style="@style/Widget.MaterialComponents.Button.TextButton"/>
             </LinearLayout>
 
+            <!-- [P45-Replay] CSV 재생 버튼 — 단말 imu_csv/replay/latest.csv 사용 -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnReplay"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Replay (latest.csv 재생)"
+                app:icon="@android:drawable/ic_media_play"
+                style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
+
         </LinearLayout>
     </androidx.core.widget.NestedScrollView>
 

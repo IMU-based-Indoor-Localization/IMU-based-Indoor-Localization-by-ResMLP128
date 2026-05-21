@@ -38,6 +38,8 @@ class MainActivity : AppCompatActivity() {
             viewModel.reset()
             binding.trackView.clearPath()   // TrackView 내부 두 경로 모두 초기화
         }
+        // [P45-Replay] Replay 버튼 — 단말의 imu_csv/replay/latest.csv 를 재생
+        binding.btnReplay.setOnClickListener { startReplay() }
 
         // ── 상태 관찰 ────────────────────────────────────────────
         lifecycleScope.launch {
@@ -111,6 +113,32 @@ class MainActivity : AppCompatActivity() {
             }
             else -> super.onOptionsItemSelected(item)
         }
+    }
+
+    /**
+     * [P45-Replay] 단말의 `imu_csv/replay/latest.csv` 파일을 viewModel 에 넘겨 재생 시작.
+     *
+     * push 흐름:
+     *   PC: .\tools\push_replay.ps1 -Latest
+     *      → adb push <local.csv> /sdcard/Android/data/com.imulocal/files/imu_csv/replay/latest.csv
+     *   단말: 본 함수가 그 파일을 읽어 viewModel.start(replayCsv=file) 호출.
+     *
+     * 파일 없으면 Toast 안내 + 시작 안 함.
+     */
+    private fun startReplay() {
+        val replayDir  = java.io.File(getExternalFilesDir(null), "imu_csv/replay")
+        val replayFile = java.io.File(replayDir, "latest.csv")
+        if (!replayFile.exists()) {
+            Toast.makeText(
+                this,
+                "재생할 CSV 가 없습니다.\nPC: .\\tools\\push_replay.ps1 -Latest 로 push 후 다시 시도하세요.\n경로: ${replayFile.absolutePath}",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        val sizeKb = replayFile.length() / 1024
+        Toast.makeText(this, "Replay 시작: ${replayFile.name} (${sizeKb} KB)", Toast.LENGTH_SHORT).show()
+        viewModel.start(replayCsv = replayFile)
     }
 
     private fun exportPath() {

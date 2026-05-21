@@ -9,8 +9,12 @@ import android.util.Log
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import java.io.BufferedReader
+import java.io.File
+import java.io.FileReader
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * ImuCollector.kt
@@ -195,8 +199,26 @@ class ImuCollector(context: Context) : SensorEventListener {
         }
     }
 
+    // ── [P45-Replay] 재생 thread 상태 ───────────────────────────
+    @Volatile private var replayMode: Boolean = false
+    @Volatile private var replayThread: Thread? = null
+    private val replayStop: AtomicBoolean = AtomicBoolean(false)
+
+    /**
+     * @return 현재 인스턴스가 replay 모드 (CSV 재생) 인지 여부.
+     */
+    fun isReplayMode(): Boolean = replayMode
+
     // ── 시작 / 종료 ─────────────────────────────────────────────
-    fun start() {
+    /**
+     * @param replayMode true 이면 SensorManager 등록을 *건너뛴다*.
+     *                   대신 별도 호출되는 [startReplay] 가 CSV 를 읽어
+     *                   [processSensorData] 를 직접 호출한다.
+     */
+    fun start(replayMode: Boolean = false) {
+        this.replayMode = replayMode
+        replayStop.set(false)
+
         lastSampleTs  = -1L
         latestAccTs   = -1L
         latestGyrTs   = -1L
@@ -222,6 +244,14 @@ class ImuCollector(context: Context) : SensorEventListener {
         // [P33-A1] LPF state 초기화
         resetLpfState()
 
+        if (replayMode) {
+            Log.i(TAG, "[P45-Replay] CSV 재생 모드 — SensorManager 등록 생략. startReplay() 호출 필요")
+            // replay 모드에서도 rotVec 정확도는 CSV 안에서 받지 못하므로
+            // 임의로 HIGH(3) 으로 가정 → yaw 보정이 NaN 으로 막히지 않도록.
+            rotVecAccuracy = 3
+            return
+        }
+
         Log.i(TAG, "[P21] 영점 보정 ${CALIBRATION_DURATION_MS}ms 시작 — 기기 정지 유지 필요")
 
         sensorManager.registerListener(this, accelSensor,  SensorManager.SENSOR_DELAY_FASTEST)
@@ -243,7 +273,19 @@ class ImuCollector(context: Context) : SensorEventListener {
     }
 
     fun stop() {
-        sensorManager.unregisterListener(this)
+        // ── [P45-Replay] CSV 재생 thread 종료 신호 + join ─────────
+        if (replayMode) {
+            replayStop.set(true)
+            try {
+                replayThread?.join(500L)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            replayThread = null
+            replayMode = false
+        } else {
+            sensorManager.unregisterListener(this)
+        }
         propagateQueue.clear()
 
         // [P33-A1] LPF state 리셋
@@ -282,18 +324,32 @@ class ImuCollector(context: Context) : SensorEventListener {
     }
 
     override fun onSensorChanged(event: SensorEvent) {
-        val tsUs = event.timestamp / 1000L   // ns → μs
+        processSensorData(event.sensor.type, event.timestamp / 1000L, event.values)
+    }
 
-        when (event.sensor.type) {
-            Sensor.TYPE_ACCELEROMETER       -> { latestAcc    = event.values.clone(); latestAccTs = tsUs }
-            Sensor.TYPE_GYROSCOPE           -> { latestGyr    = event.values.clone(); latestGyrTs = tsUs }
-            Sensor.TYPE_LINEAR_ACCELERATION -> { latestLinAcc = event.values.clone() }
+    /**
+     * [P45-Replay] 센서 1 샘플 처리의 *본질 로직* (실시간 / CSV 재생 공용).
+     *
+     * 실시간 모드: onSensorChanged(event) → 본 함수.
+     * Replay  모드: startReplay(csv) → CSV 1 라인 → 본 함수.
+     *
+     * @param sensorType Sensor.TYPE_ACCELEROMETER / GYROSCOPE / LINEAR_ACCELERATION / ROTATION_VECTOR
+     * @param tsUs       해당 샘플 타임스탬프 (μs, monotonic — boot time 기준)
+     * @param values     센서 값 배열 — rotVec 만 size>=4 (스칼라 w 포함), 그 외 size=3
+     */
+    fun processSensorData(sensorType: Int, tsUs: Long, values: FloatArray) {
+        when (sensorType) {
+            Sensor.TYPE_ACCELEROMETER       -> { latestAcc    = values.copyOf(3); latestAccTs = tsUs }
+            Sensor.TYPE_GYROSCOPE           -> { latestGyr    = values.copyOf(3); latestGyrTs = tsUs }
+            Sensor.TYPE_LINEAR_ACCELERATION -> { latestLinAcc = values.copyOf(3) }
             // linAcc 는 별도 타임스탬프 동기 불요: TYPE_ACCELEROMETER 와 동일 타임베이스에서
             // 파생되므로 최신값 사용으로 충분
             Sensor.TYPE_ROTATION_VECTOR -> {
                 // 3×3 회전 행렬(row-major, device→world) 로 변환
                 val rotMat = FloatArray(9)
-                android.hardware.SensorManager.getRotationMatrixFromVector(rotMat, event.values)
+                // SensorManager.getRotationMatrixFromVector 는 rotation vector 의 3 또는 4 원소 형태 지원.
+                // CSV 에서 4 원소로 들어올 수 있으므로 그대로 전달.
+                android.hardware.SensorManager.getRotationMatrixFromVector(rotMat, values)
                 // yaw = atan2(R[1,0], R[0,0])  (EKF 와 동일한 ZYX Euler yaw 공식)
                 //   rotMat[row*3+col] → R[1,0]=rotMat[3], R[0,0]=rotMat[0]
                 latestYawRad = Math.atan2(rotMat[3].toDouble(), rotMat[0].toDouble()).toFloat()
@@ -515,5 +571,127 @@ class ImuCollector(context: Context) : SensorEventListener {
         calibProgress   = 1f
         // 캘리브레이션 종료 직후 첫 sample 이 곧바로 흐르도록 lastSampleTs 재초기화
         lastSampleTs = -1L
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // [P45-Replay] CSV 재생 (ImuTestActivity 기록 CSV → processSensorData)
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * 별도 thread 가 CSV 를 *기록 당시 타임스탬프 간격* 으로 재생한다.
+     *
+     * 전제: [start] 가 `replayMode=true` 로 먼저 호출되어 SensorManager 미등록 + 캘리브 상태로 진입.
+     * 본 함수가 그 위에 CSV 를 흘려보내 [processSensorData] 를 호출.
+     *
+     * CSV 형식 (ImuTestActivity 기록):
+     * ```
+     * sensor,ts_ns,x,y,z,w
+     * acc,1234567890,0.012,-9.811,0.034,0.0
+     * gyr,1234567892,0.0011,-0.0023,0.0008,0.0
+     * linAcc,1234567893,0.011,-0.001,0.024,0.0
+     * rotVec,1234567895,0.012,0.034,-0.067,0.997
+     * ```
+     *
+     * @param csvFile     재생할 CSV. 헤더 1 줄 + ts 오름차순 데이터 라인.
+     * @param speedFactor 재생 속도 배수 (1.0=실시간, 2.0=2배속, 0.5=절반속). 디버깅 편의.
+     * @param onFinished  CSV 끝 또는 [stop] 호출 시 main thread 와 무관하게 호출되는 콜백.
+     */
+    fun startReplay(
+        csvFile: File,
+        speedFactor: Double = 1.0,
+        onFinished: () -> Unit = {}
+    ) {
+        if (!replayMode) {
+            Log.e(TAG, "[P45-Replay] start(replayMode=true) 호출 전에 startReplay 호출됨 — 무시")
+            return
+        }
+        if (!csvFile.exists()) {
+            Log.e(TAG, "[P45-Replay] CSV 파일 없음: ${csvFile.absolutePath}")
+            onFinished()
+            return
+        }
+
+        val thread = Thread({
+            var lineCount = 0L
+            var firstTsNs = -1L
+            val tStartElapsedMs = android.os.SystemClock.elapsedRealtime()
+
+            try {
+                BufferedReader(FileReader(csvFile)).use { br ->
+                    val header = br.readLine()  // "sensor,ts_ns,x,y,z,w"
+                    if (header == null) {
+                        Log.e(TAG, "[P45-Replay] CSV 비어있음: ${csvFile.name}")
+                        return@use
+                    }
+
+                    var line = br.readLine()
+                    while (line != null && !replayStop.get()) {
+                        val parts = line.split(',')
+                        if (parts.size < 5) { line = br.readLine(); continue }
+
+                        val sensorTag = parts[0]
+                        val tsNsParsed = parts[1].toLongOrNull()
+                        if (tsNsParsed == null) { line = br.readLine(); continue }
+                        val tsNs      = tsNsParsed
+                        val x         = parts[2].toFloatOrNull() ?: 0f
+                        val y         = parts[3].toFloatOrNull() ?: 0f
+                        val z         = parts[4].toFloatOrNull() ?: 0f
+                        val w         = if (parts.size >= 6) parts[5].toFloatOrNull() ?: 0f else 0f
+
+                        // sensor 문자열 → Sensor.TYPE_* 매핑
+                        val sensorType = when (sensorTag) {
+                            "acc"    -> Sensor.TYPE_ACCELEROMETER
+                            "gyr"    -> Sensor.TYPE_GYROSCOPE
+                            "linAcc" -> Sensor.TYPE_LINEAR_ACCELERATION
+                            "rotVec" -> Sensor.TYPE_ROTATION_VECTOR
+                            else     -> { line = br.readLine(); continue }
+                        }
+
+                        // 첫 라인의 ts 를 wall clock 기준점으로 사용
+                        if (firstTsNs < 0L) firstTsNs = tsNs
+
+                        // 기록 시점 경과 (ms) = (현재 라인 ts - 첫 ts) / 1e6 / speedFactor
+                        val csvElapsedMs = ((tsNs - firstTsNs).toDouble() / 1_000_000.0 / speedFactor).toLong()
+                        val wallElapsedMs = android.os.SystemClock.elapsedRealtime() - tStartElapsedMs
+                        val sleepMs = csvElapsedMs - wallElapsedMs
+                        if (sleepMs > 1L) {
+                            try { Thread.sleep(sleepMs) }
+                            catch (e: InterruptedException) {
+                                Thread.currentThread().interrupt()
+                                break
+                            }
+                        }
+
+                        // 센서 값 배열 — rotVec 만 4 원소 (w 포함), 그 외 3 원소
+                        val values = if (sensorType == Sensor.TYPE_ROTATION_VECTOR) {
+                            floatArrayOf(x, y, z, w)
+                        } else {
+                            floatArrayOf(x, y, z)
+                        }
+
+                        // tsUs 는 CSV 의 ts_ns 를 그대로 변환 (boot-time monotonic 가정)
+                        processSensorData(sensorType, tsNs / 1000L, values)
+
+                        lineCount++
+                        if (lineCount % 1000L == 0L) {
+                            Log.i(TAG, "[P45-Replay] 진행 ${lineCount} 라인 (csv ${csvElapsedMs}ms / wall ${wallElapsedMs}ms)")
+                        }
+
+                        line = br.readLine()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "[P45-Replay] 재생 중 오류: ${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                val totalMs = android.os.SystemClock.elapsedRealtime() - tStartElapsedMs
+                Log.i(TAG, "[P45-Replay] 재생 종료 — 처리 ${lineCount} 라인, wall ${totalMs}ms, stopFlag=${replayStop.get()}")
+                onFinished()
+            }
+        }, "ImuReplayThread")
+
+        replayThread = thread
+        thread.isDaemon = true
+        thread.start()
+        Log.i(TAG, "[P45-Replay] 재생 thread 시작: ${csvFile.name} (speed=${speedFactor}x)")
     }
 }

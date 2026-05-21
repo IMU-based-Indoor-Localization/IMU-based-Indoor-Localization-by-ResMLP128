@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.atan2
@@ -355,9 +356,15 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     )
 
     // ?? 痢≪쐞 ?쒖옉 ????????????????????????????????????????????????
-    fun start() {
+    /**
+     * @param replayCsv null 이면 실시간 측위. File 이면 CSV 재생 모드 (P45-Replay).
+     *   CSV 형식은 ImuTestActivity 기록 (sensor,ts_ns,x,y,z,w).
+     */
+    fun start(replayCsv: File? = null) {
         if (_state.value.isRunning) return
         startTimeMs = System.currentTimeMillis()
+        val mode = if (replayCsv != null) "Replay(${replayCsv.name})" else "실시간"
+        Log.i(TAG, "측위 시작 [$mode] — 워밍업 ${WARMUP_DURATION_MS}ms")
         Log.i(TAG, "痢≪쐞 ?쒖옉 (?뚮컢??${WARMUP_DURATION_MS}ms ?숈븞 沅ㅼ쟻 ?쒖떆 ?듭젣)")
 
         viewModelScope.launch(Dispatchers.IO) {
@@ -368,7 +375,16 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             }
 
             // IMU ?섏쭛 ?쒖옉 (罹섎━釉뚮젅?댁뀡 吏꾩엯 ??2珥덇컙 sample ?먯뿉 ?ㅼ뼱媛吏 ?딆쓬)
-            imuCollector.start()
+            imuCollector.start(replayMode = replayCsv != null)
+
+            // [P45-Replay] CSV 재생 thread 시작 — 캘리브 polling 보다 *먼저* 시작되어야 함.
+            // CSV 처음 2초 = 측정 당시 정지 자세였다고 가정. 자동 캘리브 사용.
+            if (replayCsv != null) {
+                imuCollector.startReplay(replayCsv) {
+                    Log.i(TAG, "[P45-Replay] CSV 끝 도달 — 측위 자동 종료")
+                    viewModelScope.launch { stop() }
+                }
+            }
 
             // ?? [P21-ish] 罹섎━釉뚮젅?댁뀡 吏꾪뻾瑜?polling ??????????????????
             // EkfBridge ?앹꽦쨌propJob ?쒖옉 *?? ??2 珥덇컙 polling.
