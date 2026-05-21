@@ -30,7 +30,29 @@ class InferenceEngine(private val context: Context) {
         const val OUTPUT_DISP   = 3
         const val OUTPUT_COV    = 3
         const val OUTPUT_CLS    = 7
+
+        // ─────────────────────────────────────────────────────────
+        // [P46-OOD] Android linAcc (m/s²) → OxIOD acc (g) 단위 변환
+        //
+        // 학습 데이터 단위 (P44 §1.1 진단):
+        //   OxIOD acc col[4:7] = g 단위 (gravity 제거 후 userAcceleration), norm 1.0
+        //   Android TYPE_LINEAR_ACCELERATION = m/s² 단위
+        //   → 9.81× 차이
+        //
+        // 적용 위치: normalize 직전, channel 0-2 (linAcc) 만 /9.81.
+        //          channel 3-5 (gyr) 는 rad/s 그대로 (Android = OxIOD 동일 단위).
+        //
+        // P44 R3 시도 시 (out_tlio_6ch_128 잘못된 norm 사용 시점) 86% unknown 으로
+        // 악화됐었으나, *out_classifier2 진짜 norm* 이 적용된 현재는 결과 재검증 필요.
+        //
+        // 토글 OFF: 기존 동작 (linAcc m/s² 그대로 normalize).
+        // 토글 ON:  학습 분포 매칭 시도.
+        private const val USE_OOD_FIX = true
+        private const val GRAVITY = 9.81f
     }
+
+    // 첫 추론 시 1회 진단 로그 출력용
+    @Volatile private var oodDiagLogged: Boolean = false
 
     private var module: Module? = null
 
@@ -60,13 +82,43 @@ class InferenceEngine(private val context: Context) {
         requireNotNull(module) { "모델이 로드되지 않았습니다. load() 를 먼저 호출하세요." }
         require(window.size == INPUT_CHANNEL * INPUT_LEN)
 
-        // 정규화
+        // [P46-OOD] linAcc /= 9.81 (channel 0-2) + 정규화
+        // OOD fix OFF 시: 기존 동작 (m/s² 그대로 정규화)
+        // OOD fix ON  시: linAcc 를 g 단위로 변환 후 정규화 → OxIOD 학습 분포 매칭 시도
         val normalized = FloatArray(window.size)
         for (ch in 0 until INPUT_CHANNEL) {
+            // channel 0-2 (linAcc) 만 9.81 로 나눔. channel 3-5 (gyr) 는 그대로.
+            val unitScale = if (USE_OOD_FIX && ch < 3) GRAVITY else 1f
             for (t in 0 until INPUT_LEN) {
                 val idx = ch * INPUT_LEN + t
-                normalized[idx] = (window[idx] - normMean[ch]) / normStd[ch]
+                normalized[idx] = (window[idx] / unitScale - normMean[ch]) / normStd[ch]
             }
+        }
+
+        // 첫 추론 시 1회 진단 — 변환 전 raw 통계 vs 변환 후 normalized 통계
+        if (!oodDiagLogged) {
+            oodDiagLogged = true
+            val rawMeanCh = FloatArray(INPUT_CHANNEL)
+            val rawStdCh  = FloatArray(INPUT_CHANNEL)
+            val normMeanCh = FloatArray(INPUT_CHANNEL)
+            val normStdCh  = FloatArray(INPUT_CHANNEL)
+            for (ch in 0 until INPUT_CHANNEL) {
+                var s = 0f; var s2 = 0f
+                var ns = 0f; var ns2 = 0f
+                for (t in 0 until INPUT_LEN) {
+                    val v  = window[ch * INPUT_LEN + t]
+                    val nv = normalized[ch * INPUT_LEN + t]
+                    s += v;   s2 += v * v
+                    ns += nv; ns2 += nv * nv
+                }
+                rawMeanCh[ch]  = s / INPUT_LEN
+                rawStdCh[ch]   = kotlin.math.sqrt((s2 / INPUT_LEN - rawMeanCh[ch] * rawMeanCh[ch]).coerceAtLeast(0f))
+                normMeanCh[ch] = ns / INPUT_LEN
+                normStdCh[ch]  = kotlin.math.sqrt((ns2 / INPUT_LEN - normMeanCh[ch] * normMeanCh[ch]).coerceAtLeast(0f))
+            }
+            Log.i(TAG, "[P46-OOD-DIAG] USE_OOD_FIX=$USE_OOD_FIX  (linAcc /9.81 ch 0-2)")
+            Log.i(TAG, "  raw  mean=${rawMeanCh.toList().map { "%.4f".format(it) }}  std=${rawStdCh.toList().map { "%.4f".format(it) }}")
+            Log.i(TAG, "  norm mean=${normMeanCh.toList().map { "%.4f".format(it) }}  std=${normStdCh.toList().map { "%.4f".format(it) }}  (≈0 / ≈1 면 학습 분포 매칭)")
         }
 
         // Tensor 생성 [1, 6, 100]

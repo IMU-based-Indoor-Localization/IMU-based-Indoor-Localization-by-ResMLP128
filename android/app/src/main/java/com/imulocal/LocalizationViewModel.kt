@@ -239,6 +239,35 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //   raw gyr (getRawGyrWindow) 사용 + EKF s_bg 차감 안 함 (v1 발산 회피).
         //   효과 없거나 발산 시 즉시 false 로 1줄 롤백.
         private const val USE_R_ALL_T_FRAME = true
+
+        // ────────────────────────────────────────────────────────────
+        // [P46] 점프 방지 게이트 (P42 jumpgate 재구축 — IMU 정합성 추가)
+        //
+        // 원인 (P42 분석 + P46 cls_replay_001 재확인):
+        //   EKF state 의 yaw drift + clone state inconsistency 가 update 시
+        //   position 변화로 풀려나오는 현상. cls_replay_001 (07:13:07.7) 에서
+        //   meas|xy|=0.75m 인데 ekfPos Y +1.78m 점프 → 측정은 정상 보행,
+        //   EKF state 가 outlier.
+        //
+        // 게이트 조건 (모두 만족 시 발동 — IMU 정합성 검증):
+        //   1) |Δekf_pos|xy > JUMP_GATE_POS_M
+        //      - EKF.update 전후 위치 xy 변화가 임계 초과
+        //   2) window 내 linAcc magnitude peak < JUMP_GATE_ACC_PEAK
+        //      - raw IMU 입력은 정상 보행 범위 (큰 가속/충격 없음)
+        //      - "IMU 센서 정보로 위치 점프 정당성 검증" — 가속도 ↓ + 위치 ↑ = outlier
+        //
+        // 발동 시 동작 (P42 방식):
+        //   1) applyPositionHold(preX, preY, preZ, 0.01)  — 위치 복귀
+        //   2) applyZupt(0.01)                             — 속도 0 강제
+        //   3) marginalize + clone history pop
+        //   4) UI 갱신 skip (trackPoints 추가 안 함) + return
+        //
+        // 토글: 임계값을 1e6 으로 키워 사실상 비활성화. ablation 시 false 로 OFF.
+        private const val USE_JUMP_GATE = true
+        /** Δekf_pos xy 임계 (m). 보행 1초 윈도우 최대 ~2m, 단일 inference (~150ms) 면 0.3m 이하 정상. */
+        private const val JUMP_GATE_POS_M = 1.5
+        /** window 내 raw linAcc body frame magnitude peak 임계 (m/s²). 정상 보행 peak ≤ 8. */
+        private const val JUMP_GATE_ACC_PEAK = 8.0
     }
 
     // ?? ?섏〈 而댄룷?뚰듃 ????????????????????????????????????????????
@@ -859,6 +888,16 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         }
         prevUsedEkfUpdate = true
 
+        // [P46-JUMP-GATE] EKF.update 직전 위치 백업 + window accPeak 계산.
+        // 발동 조건: |Δpos|xy > JUMP_GATE_POS_M  AND  accPeak < JUMP_GATE_ACC_PEAK
+        //   → IMU 입력은 정상인데 EKF 위치만 점프 = EKF outlier 확정.
+        val jgPreEkfPos: DoubleArray = if (USE_JUMP_GATE) {
+            EkfBridge.getPosition().copyOfRange(0, 3)
+        } else {
+            DoubleArray(0)
+        }
+        val jgAccPeak: Double = if (USE_JUMP_GATE) computeAccPeak(window) else 0.0
+
         try {
             Log.i(TAG, "[UPDATE-TRY] tBegin=$tBegin tEnd=$tEnd histSize=${localCloneHistory.size} hist.first=${localCloneHistory.firstOrNull()} hist.last=${localCloneHistory.lastOrNull()}")
             EkfBridge.update(meas, cov, tBegin, tEnd)
@@ -885,6 +924,37 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         if (postUpdateSpeed > MAX_POST_UPDATE_SPEED) {
             Log.w(TAG, "諛쒖궛 媛먯?: ?띾룄 ${"%.2f".format(postUpdateSpeed)} m/s > ${MAX_POST_UPDATE_SPEED} ??ZUPT 媛뺤젣 ?곸슜")
             EkfBridge.applyZupt(0.01)
+        }
+
+        // [P46-JUMP-GATE] update 후 위치 점프 검사.
+        //   조건: Δekf_pos xy > 임계 (위치 튐) AND raw linAcc peak < 임계 (IMU 입력 정상)
+        //   발동 시: applyPositionHold(pre, 0.01) + applyZupt(0.01) + marginalize +
+        //            clone pop + UI 갱신 skip + return.
+        //   accPeak 만 큰 경우 (실제 큰 움직임) 는 통과시키되 진단 로그.
+        if (USE_JUMP_GATE && jgPreEkfPos.size == 3) {
+            val dxPos  = postUpdatePos[0] - jgPreEkfPos[0]
+            val dyPos  = postUpdatePos[1] - jgPreEkfPos[1]
+            val dxyPos = sqrt(dxPos * dxPos + dyPos * dyPos)
+            if (dxyPos > JUMP_GATE_POS_M) {
+                if (jgAccPeak < JUMP_GATE_ACC_PEAK) {
+                    // EKF outlier 확정 — 발동
+                    Log.w(TAG, "[JUMP-GATE] 발동: |Δpos|xy=${"%.3f".format(dxyPos)}m > $JUMP_GATE_POS_M, " +
+                            "accPeak=${"%.2f".format(jgAccPeak)}m/s² < $JUMP_GATE_ACC_PEAK → PositionHold+ZUPT")
+                    EkfBridge.applyPositionHold(jgPreEkfPos[0], jgPreEkfPos[1], jgPreEkfPos[2], 0.01)
+                    EkfBridge.applyZupt(0.01)
+                    if (beginIdx >= 0) {
+                        EkfBridge.marginalize(beginIdx)
+                        val rm = (beginIdx + 1).coerceAtMost(localCloneHistory.size)
+                        repeat(rm) { if (localCloneHistory.isNotEmpty()) localCloneHistory.removeFirst() }
+                    }
+                    prevEkfVelNorm = 0.0
+                    return
+                } else {
+                    // 위치는 튀었으나 가속도가 큰 정상 움직임 — 통과시키되 진단
+                    Log.i(TAG, "[JUMP-GATE] 통과: |Δpos|xy=${"%.3f".format(dxyPos)}m > $JUMP_GATE_POS_M 이나 " +
+                            "accPeak=${"%.2f".format(jgAccPeak)}m/s² ≥ $JUMP_GATE_ACC_PEAK (실제 큰 움직임)")
+                }
+            }
         }
 
         // ??二쇰??? tBegin ?ы븿 洹??댁쟾 ?대줎 紐⑤몢 ?쒓굅
@@ -1015,6 +1085,34 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             if (gNorm > thr) dynamicCount++
         }
         return dynamicCount.toFloat() / ws.toFloat()
+    }
+
+    // ── 헬퍼: 윈도우 linAcc magnitude peak ────────────────────────
+    /**
+     * 윈도우 (channel-major FloatArray[6 × WINDOW_SIZE]) 의 linAcc 채널 (ch 0-2) 의
+     * 시점별 magnitude (sqrt(ax² + ay² + az²)) 의 최댓값.
+     *
+     * 점프 방지 게이트의 IMU 정합성 검증에 사용:
+     *  - 정상 보행 peak: ~3-6 m/s²
+     *  - 빠른 보행/충격: 10+ m/s²
+     *  - 정지: ~0.1-0.3 m/s²
+     * peak 가 JUMP_GATE_ACC_PEAK 미만인데 ekf 위치만 점프하면 EKF outlier 확정.
+     *
+     * 참고: 여기서 window 는 transformWindowToWorldFrame() *전* 의 raw body frame
+     * linAcc (Android TYPE_LINEAR_ACCELERATION, m/s²). 좌표계 변환은 magnitude
+     * 에 영향 없음 (||R·v|| = ||v||).
+     */
+    private fun computeAccPeak(window: FloatArray): Double {
+        val ws = ImuCollector.WINDOW_SIZE
+        var peak = 0.0
+        for (t in 0 until ws) {
+            val ax = window[0 * ws + t].toDouble()
+            val ay = window[1 * ws + t].toDouble()
+            val az = window[2 * ws + t].toDouble()
+            val norm = kotlin.math.sqrt(ax * ax + ay * ay + az * az)
+            if (norm > peak) peak = norm
+        }
+        return peak
     }
 
     // ── 헬퍼: TYPE_ROTATION_VECTOR yaw 측정 주입 ─────────────────
