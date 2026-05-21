@@ -206,8 +206,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //
         //   롤백 방법: 아래 USE_DEAD_RECKONING_BYPASS = false 로 변경 → 기존 코드 그대로.
         //
-        //   클래스 매핑 (model_meta.json 기준):
-        //     0 unknown, 1 handbag, 2 handheld, 3 pocket, 4 running, 5 slow_walk, 6 trolley
+        //   클래스 매핑 (Android CLASS_NAMES = InferenceEngine.kt L210 = train.py LABEL_REMAP 후 인덱스):
+        //     0 handbag, 1 handheld, 2 pocket, 3 running, 4 slow_walk, 5 trolley, 6 unknown
+        //   (이전 코멘트의 "model_meta.json 기준" 라벨은 raw 라벨 — P46-C 정정. 현재 model_meta.json 도 정합 수정됨.)
         //
         //   [P41 ROLLBACK] bypass01 측정에서 trackPoints 발산 → 즉시 롤백.
         //   원인 가설: Bypass 로 EKF.update 우회 후 (a) yaw 추정 정확도 저하 + (b) dispLocal
@@ -215,7 +216,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //   다음 시도 전 Python 원본 _net_pos 누적 방식의 추가 후처리 (윈도우 평균, 방향
         //   필터 등) 검토 필요.
         private const val USE_DEAD_RECKONING_BYPASS = false
-        private val NETWORK_ONLY_CLASSES = setOf(0, 1, 2, 3, 4, 5)   // 6 (trolley) 만 EKF
+        private val NETWORK_ONLY_CLASSES = setOf(0, 1, 2, 3, 4, 6)   // P46-C 정정: 5 (trolley) 만 EKF.update — 나머지는 Dead-Reckoning Bypass 대상 (USE_DEAD_RECKONING_BYPASS=true 시)
 
         // [P41 R_all[t] Frame] Python `_get_imu_samples_for_network` 와 동일 처리.
         //   매 시점 자이로 적분 (EKF s_bg 차감) 으로 Rs_bofbi[t] 계산 → 시점별 R[t] 적용.
