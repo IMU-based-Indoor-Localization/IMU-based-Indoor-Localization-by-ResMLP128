@@ -73,7 +73,7 @@ object EkfBridge {
         10.0,   // 3 running    — [P47-D] 50→10 (handheld 기준값 동일). 도보가 running 으로 분류되어도 측정 신뢰 회복
          5.0,   // 4 slow_walk  — 매우 규칙적, 측정 신뢰 ↓
          7.0,   // 5 trolley    — 기계적 안정, 측정 약간 신뢰 ↓
-        20.0    // 6 unknown    — [P49] 100→20 (handheld 10 × 2). jumpgate_010 unknown 84% × R=100 으로 측정 무시 → trajectory 2m 미만. 보수적 유지하되 측정 일부 수용
+        50.0    // 6 unknown    — [P52] 100→20→50 (P49 의 20 은 ekf 2.89m 악화 → 중간값). handheld 10 × 5, running P47-D 와 동일. cls=unknown 신뢰도 낮을 때 측정 흡수 약화
     )
 
     // Q (sigma_na): sigma_na_base = sqrt(1e-3) ≈ 0.03162 기준 ──

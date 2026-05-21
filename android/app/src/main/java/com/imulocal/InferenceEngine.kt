@@ -64,6 +64,24 @@ class InferenceEngine(private val context: Context) {
         // 토글 OFF: 기존 동작 (raw window 그대로 normalize).
         // 토글 ON:  5Hz LPF 적용 후 normalize → 학습 spectral 분포 매칭 시도.
         private const val USE_LPF = false  // P47-LPF rollback: jumpgate_008 ekf 19.6m 발산 → 가설 기각
+
+        // ─────────────────────────────────────────────────────────
+        // [P51] Disp magnitude cap — systematic OoD over-estimation 차단
+        //
+        // 진단 결과 (jumpgate_007/010/011 누적):
+        //   - 5m 왕복에 모델 |disp| sum = 44-65m (8-13× 과대)
+        //   - sx/adx 편향도 -0.77 ~ -0.99 (한 방향 systematic bias)
+        //   - innovation gate (P48) 는 단발 outlier 만 차단 — sustained bias 통과
+        //
+        // P51 적용: 모델 출력 disp 의 |xy| 크기 cap.
+        //   - 정상 보행 1초 GT max ~1.5m → cap 1.5m 안전
+        //   - |dxy| > MAX 면 vector 방향 유지 + magnitude 만 MAX 로 scale
+        //   - z 채널은 cap 영향 없음 (보행 상하 진동 ~ 0)
+        //
+        // 토글 OFF: 기존 동작 (모델 출력 그대로).
+        // 토글 ON:  cap 적용 + 발동 시 진단 로그.
+        private const val USE_DISP_CAP = true   // P51: disp |xy| > 1.5m 차단
+        private const val DISP_XY_MAX_M = 1.5f
         // Direct Form II Transposed biquad 계수 (Python scipy butter(2, 5/50) 등가)
         private const val LPF_B0 =  0.020083f
         private const val LPF_B1 =  0.040167f
@@ -203,7 +221,22 @@ class InferenceEngine(private val context: Context) {
                 FloatArray(OUTPUT_CLS).also { it[2] = 1.0f }  // index 2 = handheld
             }
             val topClass = clsProb.indices.maxByOrNull { clsProb[it] } ?: -1
-            InferenceResult(disp, dispCov, clsProb, topClass)
+
+            // [P51] disp |xy| magnitude cap — systematic OoD bias 차단
+            val finalDisp = if (USE_DISP_CAP) {
+                val dxy = kotlin.math.sqrt(disp[0] * disp[0] + disp[1] * disp[1])
+                if (dxy > DISP_XY_MAX_M) {
+                    val s = DISP_XY_MAX_M / dxy
+                    Log.w(TAG, "[P51-CAP] |disp_xy|=${"%.3f".format(dxy)}m > $DISP_XY_MAX_M → scale=${"%.3f".format(s)}")
+                    floatArrayOf(disp[0] * s, disp[1] * s, disp[2])  // xy 만 scale, z 그대로
+                } else {
+                    disp
+                }
+            } else {
+                disp
+            }
+
+            InferenceResult(finalDisp, dispCov, clsProb, topClass)
         } catch (e: Exception) {
             Log.e(TAG, "출력 파싱 실패: ${e.javaClass.simpleName}: ${e.message}")
             InferenceResult.fallback()

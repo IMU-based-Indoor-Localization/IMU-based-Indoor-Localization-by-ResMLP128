@@ -10,6 +10,14 @@
 #include <cassert>
 #include <cmath>
 #include <stdexcept>
+#include <android/log.h>
+
+// [P50-VERIFY] 빌드 반영 확인용 진단 로그.
+//   첫 update 시 1회: 빌드 시점 + MAX_INNOV_NORM + meascov_scale 출력 → Kotlin/C++ 변경 반영 검증
+//   gate 발동 시 매번: innov.norm() 또는 nse 값 출력 → 차단 통계
+#define LOG_EKF_TAG "ScEkf"
+#define LOGI_EKF(...) __android_log_print(ANDROID_LOG_INFO,  LOG_EKF_TAG, __VA_ARGS__)
+#define LOGW_EKF(...) __android_log_print(ANDROID_LOG_WARN,  LOG_EKF_TAG, __VA_ARGS__)
 
 namespace imu_ekf {
 
@@ -270,6 +278,14 @@ void ScEkf::update(const Vec3& meas, const Mat3& meas_cov,
                     int64_t t_begin_us, int64_t t_end_us) {
     if (!initialized_) return;
 
+    // [P50-VERIFY] 첫 update 시 1회 — 빌드 시점/임계값 진단
+    static bool p50_diag_logged = false;
+    if (!p50_diag_logged) {
+        p50_diag_logged = true;
+        LOGI_EKF("[P50-BUILD] cpp=%s %s  MAX_INNOV_NORM=3.0m  CHI2=11.345  meascov_scale=%.2f  mahalanobis_fail_scale=%.2f",
+                 __DATE__, __TIME__, cfg_.meascov_scale, cfg_.mahalanobis_fail_scale);
+    }
+
     // 타임스탬프로 클론 인덱스 검색
     auto find_idx = [&](int64_t ts) -> int {
         auto it = std::find(state_.si_timestamps_us.begin(),
@@ -345,13 +361,20 @@ void ScEkf::update(const Vec3& meas, const Mat3& meas_cov,
     // 실내 최대속도 ~5m/s × ~1s 윈도우 = 5m → 이노베이션 > 6m 는 물리적으로 불가 → 건너뜀.
     // 좌표 변환 오류/네트워크 이상 출력으로 인한 급격한 발산 방어.
     constexpr double MAX_INNOV_NORM = 3.0;  // [P48-A] 6.0→3.0: 보행 1초 max 1.5m × 2 안전마진. jumpgate_007 4.946m 점프 직접 차단 목표
-    if (innov.norm() > MAX_INNOV_NORM) return;
+    if (innov.norm() > MAX_INNOV_NORM) {
+        LOGW_EKF("[P50-GATE-INNOV] innov.norm=%.3fm > %.1fm — update skipped (meas=[%.3f,%.3f,%.3f] pred=[%.3f,%.3f,%.3f])",
+                 innov.norm(), MAX_INNOV_NORM,
+                 meas(0), meas(1), meas(2), pred(0), pred(1), pred(2));
+        return;
+    }
 
     // Mahalanobis gating (chi^2 임계값 11.345, ν=3, p=0.99)
     MatXX S_inv = S.inverse();
     // 1×1 행렬 → scalar: (0,0) 으로 명시 추출 (Eigen은 암묵 변환 없음)
     double nse = (innov.transpose() * S_inv * innov)(0, 0);
     if (nse > 11.345) {
+        LOGW_EKF("[P50-GATE-MAHAL] nse=%.3f > 11.345  (innov=%.3fm, scale=%.2f)",
+                 nse, innov.norm(), cfg_.mahalanobis_fail_scale);
         if (cfg_.mahalanobis_fail_scale <= 0.0) return; // 업데이트 건너뜀
         R_meas = cfg_.mahalanobis_fail_scale * R_meas;
         S = H * Sigma_ * H.transpose() + R_meas;

@@ -6,23 +6,25 @@
   "output_cls_dim": 7,
   "imu_freq_hz": 100,
   "update_freq_hz": 20,
+  "_cls_labels_note": "Android CLASS_NAMES 와 동일. train.py LABEL_REMAP {-1->6, 1->0, 2->1, 3->2, 4->3, 5->4, 6->5} 적용 후 인덱스.",
   "cls_labels": {
-    "0": "unknown",
-    "1": "handbag",
-    "2": "handheld",
-    "3": "pocket",
-    "4": "running",
-    "5": "slow_walk",
-    "6": "trolley"
+    "0": "handbag",
+    "1": "handheld",
+    "2": "pocket",
+    "3": "running",
+    "4": "slow_walk",
+    "5": "trolley",
+    "6": "unknown"
   },
+  "_ekf_meascov_scale_note": "Python 측 학습 시 정의된 cls->R 값. 원래 잘못된 인덱스로 작성되었던 것을 정합 매핑으로 재배치 (값-의도 보존). \"-1\" 키는 fallback (noise/cls 없음).",
   "ekf_meascov_scale": {
     "-1": 0.001,
-    "0": 0.001,
-    "1": 0.05,
-    "2": 0.01,
-    "3": 0.005,
-    "4": 0.05,
-    "5": 0.005,
-    "6": 0.02
+    "0": 0.05,
+    "1": 0.01,
+    "2": 0.005,
+    "3": 0.05,
+    "4": 0.005,
+    "5": 0.02,
+    "6": 0.001
   }
 }

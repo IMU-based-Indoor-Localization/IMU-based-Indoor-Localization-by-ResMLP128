@@ -6,23 +6,24 @@
   "output_cls_dim": 7,
   "imu_freq_hz": 100,
   "update_freq_hz": 20,
+  "_cls_labels_note": "Android CLASS_NAMES 와 동일. train.py LABEL_REMAP {-1->6, 1->0, 2->1, 3->2, 4->3, 5->4, 6->5} 적용 후 인덱스.",
   "cls_labels": {
-    "0": "unknown",
-    "1": "handbag",
-    "2": "handheld",
-    "3": "pocket",
-    "4": "running",
-    "5": "slow_walk",
-    "6": "trolley"
+    "0": "handbag",
+    "1": "handheld",
+    "2": "pocket",
+    "3": "running",
+    "4": "slow_walk",
+    "5": "trolley",
+    "6": "unknown"
   },
+  "_ekf_meascov_scale_note": "EkfBridge.R_SCALE_PER_CLASS 와 동일 매핑 (Android 코드가 본 파일을 읽지 않으며, 실제 사용 값은 EkfBridge.kt 의 하드코딩 배열).",
   "ekf_meascov_scale": {
-    "-1": 100.0,
-    "0": 100.0,
-    "1": 50.0,
-    "2": 10.0,
-    "3": 5.0,
-    "4": 50.0,
-    "5": 5.0,
-    "6": 20.0
+    "0": 15.0,
+    "1": 10.0,
+    "2": 5.0,
+    "3": 50.0,
+    "4": 5.0,
+    "5": 7.0,
+    "6": 100.0
   }
 }
