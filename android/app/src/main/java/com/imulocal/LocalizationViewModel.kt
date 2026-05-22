@@ -306,8 +306,26 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //
         // 토글 OFF: P53 순수 모델 DR (방향도 모델 disp 사용 — 랜덤워크화).
         private val USE_PDR_HEADING = true
-        /** 윈도우 내 heading 변화가 이 값(°) 초과면 제자리 회전으로 보고 누적 제외. */
+
+        // ────────────────────────────────────────────────────────────
+        // [P55] 20Hz 속도 적분 — 추적 연속성 복원
+        //
+        // P53/P54 는 1초 비겹침 윈도우마다 1회 누적 → 갱신 1Hz, 게다가 회전 윈도우는
+        // 통째 폐기(turn-skip) → 제자리 회전 중 앱이 완전히 멈춤(사용자 보고).
+        //
+        // P55: 모델 출력(1초 윈도우 변위)을 *속도*(disp/1s)로 환산해 매 추론 틱(20Hz)
+        // 마다 dt 만큼 적분. 겹침 윈도우를 속도로 다루므로 과적분 없음(20틱×disp/20초
+        // ≈ 실제 1초 변위). 회전 윈도우는 폐기 대신 *속도 감쇠* → 멈추지 않고 추적 유지.
+        // 정지 윈도우는 속도 0(위치 고정)이되 UI 는 매 틱 갱신 → 앱이 죽지 않음.
+        //
+        /** 윈도우 내 heading 변화가 이 값(°) 초과면 제자리 회전으로 보고 속도 감쇠. */
         private const val TURN_YAW_THRESH_DEG = 60.0
+        /** 제자리 회전 윈도우의 속도 감쇠 계수 (0=정지, 1=감쇠없음). */
+        private const val TURN_SPEED_ATTEN = 0.3
+        /** 속도 EMA 평활 계수 (20Hz 틱 jitter 완화). */
+        private const val DR_VEL_EMA = 0.25
+        /** trackPoint 를 추가하는 최소 이동거리 (m) — 리스트 비대 방지. */
+        private const val DR_TRACKPOINT_MIN_MOVE = 0.1
     }
 
     // ?? ?섏〈 而댄룷?뚰듃 ????????????????????????????????????????????
@@ -353,8 +371,13 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     /** 직전 추론에서 EKF 모드였는지 — 모드 전환 시 _net_pos 재동기화용. */
     private var prevUsedEkfUpdate = true
 
-    /** [P53] RotVec DR: 마지막으로 누적 처리한 비겹침 윈도우의 끝 ts (μs). -1 = 미시작. */
-    private var lastDrEndTs: Long = -1L
+    /** [P55] RotVec DR: 마지막 적분 틱의 ts (μs). -1 = 미시작. dt 계산용. */
+    private var lastDrTickTs: Long = -1L
+    /** [P55] world-frame 속도 추정값 (m/s, EMA 평활). */
+    private var drVelX: Double = 0.0
+    private var drVelY: Double = 0.0
+    /** [P55] DR 틱 카운터 — 주기적 로그용. */
+    private var drTickCount: Int = 0
 
     // ?? [?꾩씠?붿뼱 3] Hysteresis ?곹깭 癒몄떊 ????????????????????????????
     private enum class MotionState { STATIC, MOVING }
@@ -588,8 +611,11 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         netPosX = 0.0
         netPosY = 0.0
         prevUsedEkfUpdate = true
-        // [P53] RotVec DR 게이트 초기화
-        lastDrEndTs = -1L
+        // [P55] RotVec DR 속도 적분 상태 초기화
+        lastDrTickTs = -1L
+        drVelX = 0.0
+        drVelY = 0.0
+        drTickCount = 0
         // [?꾩씠?붿뼱 3] ?곹깭 癒몄떊 珥덇린??
         motionState          = MotionState.STATIC
         staticCandidateCount = 0
@@ -1046,53 +1072,43 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             inferLatency      = inferLatency
         )
     }
-    // ── [P53] RotVec Dead-Reckoning 스텝 ──────────────────────────
+    // ── [P55] RotVec Dead-Reckoning 스텝 (20Hz 속도 적분) ──────────
     /**
-     * EKF 를 우회하고 모델 disp 를 RotVec 절대 자세 기준으로 직접 적분한다.
+     * EKF 를 우회하고 모델 출력을 *속도* 로 환산해 매 추론 틱(20Hz)마다 적분한다.
      *
-     * 오프라인 하니스(offline_eval.py)의 reconstruct() 를 단말에서 그대로 재현:
-     *  1. 1초 비겹침 윈도우 게이트 (20Hz 겹침 누적 시 ~20배 과적분 방지)
-     *  2. raw 6채널 window + per-timestep RotVec 회전행렬 확보
-     *  3. transformWindowRotVec → gravity-aligned 입력 (학습 frame='ga' 동일)
-     *  4. 모델 추론 → disp (ga frame)
-     *  5. disp[xy] 를 윈도우 시작 RotVec 절대 yaw 로 월드 회전 → netPos 누적
+     * P53/P54 의 1초 비겹침 누적 + turn-skip(회전 윈도우 폐기) → 1Hz 갱신 + 회전 중
+     * 완전 정지 문제를 해소. 모델 출력(1초 윈도우 변위)을 speed=|disp|/1s 로 환산,
+     * 겹침 윈도우를 속도로 다뤄 과적분 없이 매 틱 dt 만큼 적분한다.
+     *
+     *  1. dt = 직전 틱 이후 경과
+     *  2. transformWindowRotVec → gravity-aligned 입력 → 모델 추론 → disp
+     *  3. speed = |disp| / 윈도우길이(≈1s)
+     *  4. 정지 윈도우 → speed 0 / 제자리 회전 윈도우 → speed 감쇠 (멈춤 아님)
+     *  5. 방향 = 최신 rotVec heading (PDR). 속도 EMA 평활 후 dt 적분.
+     *  6. UI 는 매 틱 갱신 → 회전·정지 어떤 상황에서도 앱이 멈추지 않음.
      */
     private fun runRotVecDrStep() {
         val latestTs = imuCollector.getLatestSample()?.ts_us ?: return
+        val window   = imuCollector.getRawWindow()    ?: return
+        val rotMats  = imuCollector.getRotMatWindow() ?: return
 
-        // 1초 비겹침 게이트 — 마지막 누적 이후 한 윈도우 분량(≈1s) 경과해야 처리
-        if (lastDrEndTs < 0L) { lastDrEndTs = latestTs; return }
-        if (latestTs - lastDrEndTs < WINDOW_DURATION_US) return
+        // 적분 dt (초) — 첫 틱은 기준만 잡고 반환
+        if (lastDrTickTs < 0L) { lastDrTickTs = latestTs; return }
+        var dt = (latestTs - lastDrTickTs) / 1_000_000.0
+        lastDrTickTs = latestTs
+        if (dt <= 0.0) return
+        if (dt > 0.2) dt = 0.2          // 틱 누락 시 큰 점프 방지
 
-        val window  = imuCollector.getRawWindow()    ?: return
-        val rotMats = imuCollector.getRotMatWindow() ?: return
-        lastDrEndTs = latestTs
-
-        // 정적 윈도우 → 누적 생략 (netPos 유지). 다음 윈도우는 게이트로 fresh 보장.
-        val dynamicFrac = computeDynamicFraction(window)
-        if (dynamicFrac < MIN_DYNAMIC_FRACTION) {
-            Log.v(TAG, "[DR] 정적 윈도우 (dynFrac=${"%.2f".format(dynamicFrac)}) — 누적 생략")
-            return
-        }
-
-        // 윈도우 시작/끝/중앙 heading (rotVec 절대 방위) + 윈도우 내 heading 변화
         val ws = ImuCollector.WINDOW_SIZE
         fun headingAt(t: Int) =
             atan2(rotMats[t * 9 + 3].toDouble(), rotMats[t * 9].toDouble())
-        val yawStart = headingAt(0)
-        val yawMid   = headingAt(ws / 2)
-        var yawSpan  = headingAt(ws - 1) - yawStart
+
+        // 윈도우 내 heading 변화 (제자리 회전 감쇠 판정용)
+        var yawSpan = headingAt(ws - 1) - headingAt(0)
         while (yawSpan >  Math.PI) yawSpan -= 2.0 * Math.PI
         while (yawSpan < -Math.PI) yawSpan += 2.0 * Math.PI
 
-        // [P54] 제자리 회전 윈도우 → 병진 없음으로 보고 누적 생략
-        if (USE_PDR_HEADING && Math.toDegrees(abs(yawSpan)) > TURN_YAW_THRESH_DEG) {
-            Log.i(TAG, "[DR] 회전 윈도우 (Δyaw=${"%.0f".format(Math.toDegrees(yawSpan))}°)" +
-                    " — 병진 0, 누적 생략")
-            return
-        }
-
-        // RotVec per-timestep gravity-aligned 변환 + 추론
+        // RotVec gravity-aligned 변환 + 추론
         val worldWindow = transformWindowRotVec(window, rotMats)
         val inferStart  = System.currentTimeMillis()
         val result = try {
@@ -1103,47 +1119,75 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         }
         val inferLatency = System.currentTimeMillis() - inferStart
 
-        val d0  = result.disp[0].toDouble()
-        val d1  = result.disp[1].toDouble()
-        val mag = sqrt(d0 * d0 + d1 * d1)
+        // 모델 출력(≈1초 윈도우 변위) → 속도(m/s)
+        val d0     = result.disp[0].toDouble()
+        val d1     = result.disp[1].toDouble()
+        val winSec = WINDOW_DURATION_US / 1_000_000.0
+        var speed  = sqrt(d0 * d0 + d1 * d1) / winSec
 
-        val dxWorld: Double
-        val dyWorld: Double
+        // 정지 윈도우 → 속도 0 (위치 고정, 단 UI 는 계속 갱신 = 안 멈춤)
+        val dynamicFrac = computeDynamicFraction(window)
+        val isStatic    = dynamicFrac < MIN_DYNAMIC_FRACTION
+        if (isStatic) speed = 0.0
+        // 제자리 회전 윈도우 → 속도 감쇠 (병진 적으나 0 은 아님 → 추적 유지)
+        val turnDeg = Math.toDegrees(abs(yawSpan))
+        val isTurn  = turnDeg > TURN_YAW_THRESH_DEG
+        if (isTurn) speed *= TURN_SPEED_ATTEN
+
+        // 진행 방향 — PDR: 최신 rotVec heading / 토글 OFF: 모델 disp 벡터 방향
+        val targetVx: Double
+        val targetVy: Double
         if (USE_PDR_HEADING) {
-            // [P54] 모델은 크기만 — 방향은 rotVec heading(윈도우 중앙), 전진 가정.
-            dxWorld = mag * cos(yawMid)
-            dyWorld = mag * sin(yawMid)
+            val h = headingAt(ws - 1)
+            targetVx = speed * cos(h)
+            targetVy = speed * sin(h)
         } else {
-            // [P53] 모델 disp 벡터를 윈도우 시작 yaw 로 회전 (방향도 모델 사용).
-            dxWorld = cos(yawStart) * d0 - sin(yawStart) * d1
-            dyWorld = sin(yawStart) * d0 + cos(yawStart) * d1
+            val yaw0 = headingAt(0)
+            targetVx = (cos(yaw0) * d0 - sin(yaw0) * d1) / winSec
+            targetVy = (sin(yaw0) * d0 + cos(yaw0) * d1) / winSec
         }
 
-        netPosX += dxWorld
-        netPosY += dyWorld
+        // 속도 EMA 평활 (틱 jitter 완화). 정지면 즉시 0.
+        if (isStatic) {
+            drVelX = 0.0; drVelY = 0.0
+        } else {
+            drVelX += DR_VEL_EMA * (targetVx - drVelX)
+            drVelY += DR_VEL_EMA * (targetVy - drVelY)
+        }
 
-        Log.i(TAG, "[DR] cls=${result.topClass}(${result.className}) " +
-                "|disp|=${"%.3f".format(mag)} " +
-                "head=${"%.1f".format(Math.toDegrees(yawMid))}° " +
-                "dWorld=[${"%.3f".format(dxWorld)}, ${"%.3f".format(dyWorld)}] " +
-                "netPos=[${"%.2f".format(netPosX)}, ${"%.2f".format(netPosY)}]")
-
-        // 모델 only 궤적도 동일 누적 (DR 에서는 trackPoints 와 동일)
+        // 20Hz 연속 적분
+        netPosX += drVelX * dt
+        netPosY += drVelY * dt
         modelPosX = netPosX
         modelPosY = netPosY
 
-        // UI 갱신 — 워밍업 이후에만 trackPoints 추가
+        // 주기적 로그 (~1초마다)
+        if (drTickCount++ % 20 == 0) {
+            Log.i(TAG, "[DR] cls=${result.topClass}(${result.className}) " +
+                    "speed=${"%.2f".format(sqrt(drVelX * drVelX + drVelY * drVelY))}m/s " +
+                    "${if (isStatic) "STATIC " else ""}${if (isTurn) "TURN " else ""}" +
+                    "netPos=[${"%.2f".format(netPosX)}, ${"%.2f".format(netPosY)}]")
+        }
+
+        // trackPoint 는 일정 거리 이상 이동 시에만 추가 (리스트 비대 방지), 워밍업 이후
         val elapsedMs = System.currentTimeMillis() - startTimeMs
         if (elapsedMs >= WARMUP_DURATION_MS) {
-            trackPoints.add(Pair(netPosX, netPosY))
-            if (trackPoints.size > 5000) trackPoints.removeAt(0)
-            modelTrackPoints.add(Pair(modelPosX, modelPosY))
-            if (modelTrackPoints.size > 5000) modelTrackPoints.removeAt(0)
+            val last = trackPoints.lastOrNull()
+            val moved = last == null || kotlin.math.hypot(
+                netPosX - last.first, netPosY - last.second) >= DR_TRACKPOINT_MIN_MOVE
+            if (moved) {
+                trackPoints.add(Pair(netPosX, netPosY))
+                if (trackPoints.size > 5000) trackPoints.removeAt(0)
+                modelTrackPoints.add(Pair(modelPosX, modelPosY))
+                if (modelTrackPoints.size > 5000) modelTrackPoints.removeAt(0)
+            }
         }
+
+        // UI 는 매 틱(20Hz) 갱신 — 정지·회전 중에도 멈추지 않음
         _state.value = _state.value.copy(
             position          = Triple(netPosX, netPosY, 0.0),
             posStd            = Triple(0.0, 0.0, 0.0),
-            velocity          = Triple(dxWorld, dyWorld, 0.0),  // 1초 윈도우 → m/s 근사
+            velocity          = Triple(drVelX, drVelY, 0.0),
             carryMode         = result.className,
             carryProb         = result.clsProb.maxOrNull() ?: 0f,
             trackPoints       = trackPoints.toList(),
