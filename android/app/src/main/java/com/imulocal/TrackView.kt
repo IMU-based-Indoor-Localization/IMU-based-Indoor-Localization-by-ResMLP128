@@ -14,11 +14,11 @@ import android.view.View
  * ============
  * 실내 이동 경로를 실시간으로 캔버스에 그리는 커스텀 뷰.
  *
- * 두 궤적을 동시에 표시:
- *   - EKF 궤적   (파랑 #1565C0): 모델 + SC-EKF 보정 위치
- *   - 모델 궤적  (주황 #E65100): 모델 추론값 누적 (EKF 없음)
+ * 궤적 표시 (파랑 #1565C0 = 측위 궤적):
+ *   - 경로 B(RotVec DR, 현재 기본): 추정 궤적 1개. modelPoints 는 비어 있음.
+ *   - 경로 A(EKF, USE_ROTVEC_DR=false): EKF 궤적 + 모델 궤적(주황) 2개 비교 표시.
  *
- * 두 궤적의 합집합 Bounding Box 로 자동 스케일링.
+ * 표시 궤적의 합집합 Bounding Box 로 자동 스케일링.
  */
 class TrackView @JvmOverloads constructor(
     context: Context,
@@ -192,10 +192,10 @@ class TrackView @JvmOverloads constructor(
     }
 
     // ── 범례 (우상단) ─────────────────────────────────────────────
+    // [P56] 경로 B(RotVec DR)는 추정 궤적이 하나 — EKF 미사용, 단일 궤적으로 표기.
     private fun drawLegend(canvas: Canvas, w: Float, h: Float) {
         val items = listOf(
-            Pair(Color.parseColor("#1565C0"), "모델 + EKF"),
-            Pair(Color.parseColor("#E65100"), "모델 only"),
+            Pair(Color.parseColor("#1565C0"), "측위 궤적"),
             Pair(Color.parseColor("#388E3C"), "시작점")
         )
         val lineLen  = 36f
