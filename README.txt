@@ -1,4 +1,67 @@
 ================================================================
+ ★ 최신 상태 (2026-05-22, P56 milestone)
+================================================================
+
+본 README 의 아래(섹션 1~) 는 P22 시점 기준 역사적 기록이다. 앱 구조는
+P53~P56 에 걸쳐 크게 변경되었으므로 최신 사용·이해는 이 섹션과 최근
+git log, 그리고 Notion 논문(아래)을 우선 참조한다.
+
+【논문 / Thesis (변경 없음)】
+  "Context-Aware Adaptive EKF for IMU-based Indoor Localization"
+  - multi-head 1D-ResMLP (변위 + 공분산 + 휴대모드 분류)
+  - 분류 확률로 EKF 의 Q/R 을 soft-switching (Σ p_k · θ^(k))
+  - Oxford Inertial Odometry Dataset 으로 검증 (분류 98.68%)
+
+【배포 모델 (assets/imu_model.ptl)】
+  out_classifier2 — multi-head ResMLP128 (OxIOD 학습). 변경 없음.
+
+【Android 앱 — 현재 경로 B (P53~P56, USE_ROTVEC_DR=true)】
+  논문의 EKF 경로(경로 A) 가 단말에서 발산하는 문제(P40~P52 미해결)를
+  우회하기 위해 dead-reckoning 경로를 채택. 모델 출력 + rotVec 자세 융합.
+
+  - P53  RotVec dead-reckoning: EKF 클론/update 우회. ImuCollector 에
+         per-sample rotVec 회전행렬 저장, per-timestep gravity-aligned 변환
+         (학습 frame 과 동일).
+  - P54  PDR-hybrid: 모델 |disp|(크기) + rotVec heading(방향). Android 에서
+         모델의 *방향* 이 OoD 로 랜덤워크화되는 문제를 heading 으로 대체해
+         5m 왕복이 직선으로 그려지게 함.
+  - P55  20Hz 속도 적분: 1Hz 비겹침 누적 → 매 추론 틱 속도 적분 으로 교체.
+         회전·정지 어떤 상황에서도 끊김 없는 연속 추적.
+  - P56  클래스별 속도 스케일 소프트 스위칭:
+         effectiveSpeed = modelSpeed × Σ_k clsProb_k · SPEED_SCALE_PER_CLASS_k
+         논문의 Σ p_k·θ^(k) 형식을 DR speed scale 에 적용 — 경로 B 가
+         분류 헤드를 기능적으로 사용. 모델의 Android 변위 과소추정 보정.
+
+  주요 토글 (LocalizationViewModel.kt):
+    USE_ROTVEC_DR=true  (경로 B, 기본)        DR + rotVec heading
+    USE_ROTVEC_DR=false                       경로 A (논문 EKF, 단말 발산)
+    USE_PDR_HEADING=true (기본)               방향 rotVec / false=모델 disp 벡터
+
+【알려진 한계 (정직)】
+  - 모델은 iPhone(OxIOD) 학습 → Android 폰에서 변위 *방향* 랜덤워크화
+    (offline_eval.py GT 로 확인). 경로 B 는 rotVec heading 로 대체.
+  - 모델 *크기* 도 Android 에서 ~40% 과소 → P56 ×1.5 스케일로 평균 보정.
+    walk1/walk2 비대칭은 전역 스케일로 못 고침 (모델 per-window 편차).
+  - 분류기도 Android 에서 OoD (대부분 unknown) → P56 소프트 스위칭은
+    구조만 들어가 있고 사실상 전역 1.5× 로 동작. per-class 차등을 위해선
+    휴대모드별 측정 데이터 수집 필요.
+  - RoNIN(Asus Android) fine-tuning 도 사용자 Samsung 으로 전이 실패 확인
+    (트랙 종결, 미배포). 학습 IO 의 device 도메인 갭은 해당 기기 데이터
+    없이 닫기 어렵다는 게 실증됐다.
+
+【오프라인 진단 도구】
+  - src/Network/offline_eval.py  — IMU 시퀀스 → 모델 → window 별 disp 재현,
+                                   OxIOD(GT) + Android CSV 진단 매트릭스.
+  - src/View/analyze_latest_csv.py — Android CSV 구간(정지/이동/회전) 분석.
+
+【최근 커밋 (참조)】
+  db6db2f P56  소프트 스위칭 + 범례 단일화
+  fc665dc P55  20Hz 속도 적분 (추적 연속성 복원)
+  23d3b30 P53 + P54  RotVec DR + PDR-hybrid + 오프라인 진단 하니스
+  1adfa45 P50 + P51 + P52  C++ 게이트 진단 로그 + disp cap + JUMP-GATE
+  (이전 P22 까지의 상세는 docs/HANDOFF_P39, P40 와 아래 본문 참조)
+
+================================================================
 실제 실행 방법 및 검증 방법은 5~7
   - HANDOFF_P22.md          최신 상태 핸드오프 스냅샷 (P22 시점)
   - 수정_이력_보고서.docx     P9~P22 전체 수정 이력 (18 장, 726 단락)
