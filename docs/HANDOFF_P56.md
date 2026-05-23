@@ -215,9 +215,23 @@ P56 실측 결과 (latest.csv 5 m 왕복):
 
 ---
 
+## 8.5 TLIO 논문 EKF 계수 오프라인 비교 (2026-05-23 추가)
+
+`src/Network/compare_tlio_ekf.py` + `imu_ekf_py.py` 신설.
+
+- 목적: 단말 EKF (imu_ekf.cpp) 식은 그대로 두고 **계수만 TLIO 논문 값** 으로
+  바꾼 변형을 같은 IMU+모델 시퀀스에 입력해 궤적 차이를 격리 측정.
+- 두 cfg 가 다른 점: `init_vel_sigma 1.0→0.1`, `init_ba_sigma 0.02→0.2`,
+  `meascov_scale 1.0→10.0` (TLIO §V-D 끝 — temporal correlation 보정).
+- latest.csv 시연 결과: TLIO cfg 가 χ² 게이트 통과율 6.5× 증가
+  (2→13 updates), 종점 폐합 1.49 → **1.00 m** 개선. EKF 식·gate·χ² 임계는
+  완전히 동일하므로 *계수 효과만* 격리됨.
+- 단말 코드 변경 0. 본 도구는 사용자 측 `--android latest.csv` 한 줄로 동작.
+
 ## 9. 현재 커밋 상태
 
 ```
+(P59) compare_tlio_ekf.py + imu_ekf_py.py — TLIO 논문 EKF 계수 오프라인 비교 도구
 (P58) carryMode 표시를 메인 UI → IMU 진단 화면으로 이동 (sharedInstance 패턴)
 a63dcbc P57  HANDHELD-only 정합화 (soft-switching 제거, 분류기 표시 전용)
 4857c93 docs  README 슬림화 + HANDOFF_P56.md 분리

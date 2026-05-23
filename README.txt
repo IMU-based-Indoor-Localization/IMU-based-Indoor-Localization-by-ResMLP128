@@ -272,6 +272,16 @@
        src/View/visualize_comparison.py
          - OxIOD 시퀀스에 대해 Python SC-EKF 추적 + 그래프
 
+  9.4. EKF 계수 비교 (현재 단말 cfg vs TLIO 논문 cfg)
+       src/Network/compare_tlio_ekf.py  (+ imu_ekf_py.py)
+         - imu_ekf.cpp 식과 1:1 동등한 self-contained Python EKF.
+         - 같은 IMU+모델 시퀀스를 두 cfg 변형에 동기 입력 → 두 궤적 비교.
+         - TLIO 차이: σ_v 1.0→0.1, σ_ba 0.02→0.2, meascov_scale 1.0→10.0.
+       사용 예:
+         python src/Network/compare_tlio_ekf.py \
+           --model_dir src/Network/out_classifier2 \
+           --android latest.csv --plot logs/tlio_compare.png
+
 
 ================================================================
  10. Logcat 으로 동작 검증
