@@ -62,7 +62,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="캘리브레이션을 위해 2초간 기기를 가만히 두세요."
+                        android:text="캘리브레이션을 위해 2초간 기기를 가만히 두세요.\n측위는 폰을 진행 방향으로 들고 보행하는 HANDHELD 자세를 권장합니다."
                         android:textSize="13sp"
                         android:textColor="#5D4037"/>
 
@@ -88,7 +88,7 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- 경로 뷰 (모델+EKF 파랑 / 모델only 주황 동시 표시) -->
+            <!-- 경로 뷰 (P57: 경로 B 단일 궤적 — 파랑 측위 궤적 + 초록 시작점) -->
             <com.imulocal.TrackView
                 android:id="@+id/trackView"
                 android:layout_width="match_parent"
@@ -113,7 +113,7 @@
                     <TextView android:id="@+id/tvPosition"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="[EKF] x=0.000  y=0.000  z=0.000 m"
+                        android:text="[위치] x=0.000  y=0.000  z=0.000 m"
                         android:textSize="14sp"
                         android:textColor="#1565C0"
                         android:fontFamily="monospace"/>
@@ -137,7 +137,7 @@
                     <TextView android:id="@+id/tvCarryMode"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="휴대 방식: unknown (0%)"
+                        android:text="휴대 방식: unknown (0%) — 표시 전용"
                         android:textSize="13sp"
                         android:layout_marginTop="4dp"/>
 

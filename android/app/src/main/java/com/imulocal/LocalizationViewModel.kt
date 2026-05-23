@@ -328,21 +328,23 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         private const val DR_TRACKPOINT_MIN_MOVE = 0.1
 
         // ────────────────────────────────────────────────────────────
-        // [P56] 클래스별 속도 스케일 소프트 스위칭
+        // [P57] HANDHELD-only 데모 — 단일 속도 스케일
         //
-        // 모델의 Android 변위 과소추정을 분류 확률 가중 스케일로 보정:
-        //   effectiveSpeed = modelSpeed × Σ_k clsProb_k · SPEED_SCALE_PER_CLASS_k
-        // 논문 Context-Aware soft-switching(Σ p_k·θ^(k))을 DR speed scale 에 적용한 형태
-        // — 경로 B(DR)가 분류 헤드를 기능적으로 사용하게 된다.
+        // 결정 배경 (docs/HANDOFF_P56.md §8):
+        //   - 분류기 자체가 Android 도메인에서 OoD(주로 unknown) → per-class
+        //     스위칭의 신뢰 근거 없음.
+        //   - rotVec heading = 진행 방향 가정은 handheld 자세에서만 유효.
+        //   - 현재 보정 데이터로는 모든 클래스가 균일 ~1.5× → soft-switching
+        //     구조는 의미 없는 *가짜 구조* 였음(P56 한계 메모).
         //
-        // [한계] 휴대모드별 과소비율의 실측 보정 데이터가 없어 현재 값은 *균일*(~1.5×).
-        //   사실상 전역 크기 보정으로 동작하며 소프트 스위칭 구조만 갖춘 상태다.
-        //   Android 에서 분류기 자체가 OoD(대부분 unknown) → unknown 값이 지배적.
-        //   per-class 차등은 휴대모드별 측정 데이터 확보 후 산출 예정.
-        // 인덱스: 0 handbag 1 handheld 2 pocket 3 running 4 slow_walk 5 trolley 6 unknown
-        private val SPEED_SCALE_PER_CLASS = doubleArrayOf(
-            1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5
-        )
+        // P57: SPEED_SCALE_PER_CLASS(7) 소프트 스위칭 제거 → 단일 상수로 단순화.
+        //   effectiveSpeed = modelSpeed × HANDHELD_SPEED_SCALE
+        //   분류기 출력(clsProb, topClass)은 *UI 표시 전용* 으로 유지하되,
+        //   위치 계산엔 사용하지 않는다(정합화).
+        //
+        // 향후 휴대모드별 실측 보정 데이터가 확보되면 그때 다시 가중 스위칭
+        // 구조를 복원한다 (git history 의 P56 커밋 참조).
+        private const val HANDHELD_SPEED_SCALE = 1.5
     }
 
     // ?? ?섏〈 而댄룷?뚰듃 ????????????????????????????????????????????
@@ -1142,14 +1144,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         val winSec = WINDOW_DURATION_US / 1_000_000.0
         var speed  = sqrt(d0 * d0 + d1 * d1) / winSec
 
-        // [P56] 클래스별 속도 스케일 소프트 스위칭 — 분류 확률 가중 보정
-        var scaleSoft = 0.0
-        val cp = result.clsProb
-        for (k in 0 until minOf(cp.size, SPEED_SCALE_PER_CLASS.size)) {
-            scaleSoft += cp[k] * SPEED_SCALE_PER_CLASS[k]
-        }
-        if (scaleSoft <= 0.0) scaleSoft = 1.0     // clsProb 합 0 등 방어
-        speed *= scaleSoft
+        // [P57] HANDHELD-only 단일 스케일 — 분류기 출력은 표시 전용(아래 carryMode).
+        // 모델의 Android 변위 ~30~40% 과소 → 균일 ~1.5× 보정.
+        speed *= HANDHELD_SPEED_SCALE
 
         // 정지 윈도우 → 속도 0 (위치 고정, 단 UI 는 계속 갱신 = 안 멈춤)
         val dynamicFrac = computeDynamicFraction(window)
@@ -1190,7 +1187,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // 주기적 로그 (~1초마다)
         if (drTickCount++ % 20 == 0) {
             Log.i(TAG, "[DR] cls=${result.topClass}(${result.className}) " +
-                    "scale=${"%.2f".format(scaleSoft)} " +
+                    "scale=${"%.2f".format(HANDHELD_SPEED_SCALE)} " +
                     "speed=${"%.2f".format(sqrt(drVelX * drVelX + drVelY * drVelY))}m/s " +
                     "${if (isStatic) "STATIC " else ""}${if (isTurn) "TURN " else ""}" +
                     "netPos=[${"%.2f".format(netPosX)}, ${"%.2f".format(netPosY)}]")

@@ -75,8 +75,8 @@
   [DR 적분: LocalizationViewModel.runRotVecDrStep]
    - 모델 |disp_xy| → "1초 윈도우 변위" → 속도 = |disp|/winSec
    - heading      = 윈도우 중앙 rotVec yaw (PDR-hybrid)
-   - 속도 스케일  = Σ_k clsProb_k × SPEED_SCALE_PER_CLASS_k
-                    (Σ p_k·θ^(k) 형식의 소프트 스위칭)
+   - 속도 스케일  = HANDHELD_SPEED_SCALE (P57 단일 스칼라, 균일 1.5×)
+                    분류기 출력은 표시 전용 — 위치 계산에 미사용.
    - 회전 윈도우  : |Δyaw|>60° 이면 속도 × 0.3 감쇠 (멈춤 방지)
    - 정지 윈도우  : 속도 0
    - 20Hz dt 적분  v_ema = lerp(v, v_new, 0.25)
@@ -99,8 +99,9 @@
   TURN_SPEED_ATTEN         0.3         회전 윈도우 속도 감쇠
   DR_VEL_EMA               0.25        속도 EMA 평활
   DR_TRACKPOINT_MIN_MOVE   0.1 m       trackPoint 추가 최소 이동
-  SPEED_SCALE_PER_CLASS    [1.5]×7     클래스별 속도 스케일
-                                       (현재 균일 — §8 참고)
+  HANDHELD_SPEED_SCALE     1.5         HANDHELD 단일 속도 스케일
+                                       (P57: per-class 소프트 스위칭
+                                        제거, 분류기 출력은 표시 전용)
   WARMUP_DURATION_MS       3000        캘리브 후 워밍업 (궤적 미표시)
 
 
@@ -220,8 +221,9 @@
    (b) 모델 변위 *크기* 과소 (Android)
        - OxIOD(iPhone) 학습 → Samsung Android 단말에서 보행 |disp|
          ~30~40% 과소.
-       - 현재 SPEED_SCALE_PER_CLASS = 균일 ~1.5× 로 평균 보정.
-       - per-class 차등 보정에는 휴대모드별 실측 데이터가 필요.
+       - 현재 HANDHELD_SPEED_SCALE = 1.5× 단일 상수로 평균 보정 (P57).
+       - per-class 차등 보정 필요 시: 휴대모드별 실측 데이터 확보 후
+         P56 시점의 가중 스위칭 구조 복원(git history).
        - walk1/walk2 의 *비대칭 과소* 는 전역 스케일로 못 고친다
          (모델 per-window 편차).
 
@@ -319,4 +321,4 @@
   - 코드 검색: IDE Find in Files (Ctrl+Shift+F)
               핵심 키워드: USE_ROTVEC_DR, runRotVecDrStep,
                           transformWindowRotVec,
-                          SPEED_SCALE_PER_CLASS, getRawWindow
+                          HANDHELD_SPEED_SCALE, getRawWindow

@@ -48,9 +48,10 @@ class MainActivity : AppCompatActivity() {
                 binding.btnStart.isEnabled = !s.isRunning
                 binding.btnStop.isEnabled  =  s.isRunning
 
-                // 위치 텍스트 (EKF 보정 위치)
+                // [P57] 위치 텍스트 — 경로 B(RotVec DR + PDR-hybrid) 누적 위치.
+                // 경로 A(EKF) 토글 활성화 시에도 같은 필드를 공유.
                 binding.tvPosition.text = String.format(
-                    "[EKF] x=%.3f  y=%.3f  z=%.3f m",
+                    "[위치] x=%.3f  y=%.3f  z=%.3f m",
                     s.position.first, s.position.second, s.position.third
                 )
                 // 불확실도
@@ -67,9 +68,10 @@ class MainActivity : AppCompatActivity() {
                         s.velocity.third  * s.velocity.third
                     )
                 )
-                // 휴대 방식
+                // [P57] 휴대 방식 — 표시 전용(위치 계산엔 사용 안 함).
+                // 데모는 HANDHELD 자세 한정. docs/HANDOFF_P56.md §8 참고.
                 binding.tvCarryMode.text =
-                    "휴대 방식: ${s.carryMode}  (${(s.carryProb * 100).toInt()}%)"
+                    "휴대 방식: ${s.carryMode}  (${(s.carryProb * 100).toInt()}%) — 표시 전용"
 
                 // 추론 latency
                 binding.tvLatency.text = "추론 지연: ${s.inferLatency} ms"
@@ -85,7 +87,7 @@ class MainActivity : AppCompatActivity() {
                     binding.calibCard.visibility = View.GONE
                 }
 
-                // EKF 궤적만 표시
+                // [P57] 경로 B 단일 궤적 — modelTrackPoints 미사용(범례 단일화).
                 binding.trackView.updatePaths(s.trackPoints, emptyList())
             }
         }
