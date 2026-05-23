@@ -213,14 +213,6 @@
     LocalizationViewModel.start(replayCsv = File(...)) 로 재생 가능.
     수집-측위 분리 검증에 사용.
 
-    재생 방법 2가지:
-      1) [Replay (latest.csv 재생)] 버튼 — imu_csv/replay/latest.csv 자동 재생
-      2) 메뉴 → "Replay (CSV 선택)" — imu_csv/ 하위 모든 .csv 자동 나열 →
-                                       단일 선택 (P62)
-         · 포함: imu_csv/imu_record_*.csv (단말 수집), replay/latest.csv (push),
-                 사용자가 imu_csv/ 하위에 둔 임의 .csv
-         · 최근 수정 순 정렬, 파일명+크기 표시
-
 
   8.1. 알려진 한계 (정직)
   -----------------------
