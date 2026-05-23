@@ -953,15 +953,22 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         val rawDz = result.disp[2].toDouble()
         val meas: DoubleArray = if (USE_PDR_MEAS_FOR_EKF) {
             val xyMag = sqrt(rawDx * rawDx + rawDy * rawDy)
-            val headingW = imuCollector.getLatestYawRad().toDouble()
-            val dxW = xyMag * cos(headingW)
-            val dyW = xyMag * sin(headingW)
+            // [P61-fix] rotVec yaw 는 *지구 절대 yaw*, EKF yaw 는 *EKF 시작 yaw 기준*
+            //   → 두 frame 정합을 위해 yawRvAtInit(EKF 초기화 시점의 rotVec yaw)을 차감.
+            //   yawRvAtInit 이 NaN(rotVec 정확도 부족)이면 보정 못 함 → 0 으로 폴백.
+            val headingRv  = imuCollector.getLatestYawRad().toDouble()
+            val rvOffset   = if (yawRvAtInit.isNaN()) 0.0 else yawRvAtInit
+            val headingEkf = headingRv - rvOffset
+            val dxW = xyMag * cos(headingEkf)
+            val dyW = xyMag * sin(headingEkf)
             val yawBegin = if (R_begin.size == 9) atan2(R_begin[3], R_begin[0]) else 0.0
             val cz = cos(yawBegin); val sz = sin(yawBegin)
             val dxGa =  cz * dxW + sz * dyW
             val dyGa = -sz * dxW + cz * dyW
             Log.v(TAG, "[P61-PDR] |xy|=${"%.3f".format(xyMag)} " +
-                       "head=${"%.1f".format(Math.toDegrees(headingW))} " +
+                       "headRv=${"%.1f".format(Math.toDegrees(headingRv))} " +
+                       "rvOff=${"%.1f".format(Math.toDegrees(rvOffset))} " +
+                       "headEkf=${"%.1f".format(Math.toDegrees(headingEkf))} " +
                        "yawBegin=${"%.1f".format(Math.toDegrees(yawBegin))} " +
                        "meas_ga=[${"%.3f".format(dxGa)},${"%.3f".format(dyGa)},${"%.3f".format(rawDz)}]")
             doubleArrayOf(dxGa, dyGa, rawDz)
