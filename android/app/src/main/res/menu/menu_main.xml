@@ -13,8 +13,4 @@
         android:id="@+id/action_ekf_mode"
         android:title="EKF 모드 (비교용)"
         app:showAsAction="never"/>
-    <item
-        android:id="@+id/action_replay_pick"
-        android:title="Replay (휴대폰 CSV 선택)"
-        app:showAsAction="never"/>
 </menu>
