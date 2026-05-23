@@ -247,6 +247,11 @@ P59 의 오프라인 비교(`compare_tlio_ekf.py`) 에 더해, 단말에서도 �
 기본 데모는 변경 없음 (PATH_B 기본). 비교 측정 시에만 EKF_CURRENT /
 EKF_TLIO 로 전환해 같은 경로를 두 번 보행 → adb pull → 외부 비교.
 
+**Replay 변형(추천)**: `fun start(replayCsv: File? = null)` 한 진입점이
+실시간/Replay 두 흐름을 공유하므로 [Replay (latest.csv 재생)] 버튼도
+같은 ekfMode 토글을 따른다. 같은 IMU CSV 를 두 모드로 재생하면 *입력이
+완전히 동일* → cfg 효과만 격리되어 가장 깔끔한 단말 비교가 된다.
+
 ## 9. 현재 커밋 상태
 
 ```

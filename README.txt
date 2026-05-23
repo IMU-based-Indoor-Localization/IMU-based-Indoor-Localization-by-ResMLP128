@@ -291,6 +291,12 @@
            track_EKF_CURRENT_*.csv  track_EKF_TLIO_*.csv \
            --out logs/ekf_mode_overlay.png
 
+       [Replay 변형 — 추천] 입력 IMU 가 완전히 동일해서 cfg 효과만 격리됨.
+         1) ImuTestActivity 로 한 번 보행 → latest.csv 단말 저장
+         2) 메뉴 → EKF_CURRENT → [Replay] → 정지 → 내보내기
+         3) 메뉴 → EKF_TLIO    → [Replay] → 정지 → 내보내기
+         4) adb pull → overlay_tracks.py (위와 동일)
+
 
 ================================================================
  10. Logcat 으로 동작 검증
