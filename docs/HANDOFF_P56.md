@@ -228,9 +228,29 @@ P56 실측 결과 (latest.csv 5 m 왕복):
   완전히 동일하므로 *계수 효과만* 격리됨.
 - 단말 코드 변경 0. 본 도구는 사용자 측 `--android latest.csv` 한 줄로 동작.
 
+## 8.6 단말 EKF 모드 토글 (P60, 2026-05-23)
+
+P59 의 오프라인 비교(`compare_tlio_ekf.py`) 에 더해, 단말에서도 모드별로
+경로 A(EKF) 를 *직접 실행* 해 trackPoints CSV 를 export 할 수 있게 했다.
+
+- `EkfBridge.kt`: `DEFAULT_PARAMS` 와 별도로 `TLIO_PARAMS` 추가
+  (init_vel 0.1, init_ba 0.2, meascov_scale 10.0). `paramsFor(cfg)` 셀렉터.
+- `LocalizationViewModel.kt`: companion 에 `EkfMode { PATH_B, EKF_CURRENT,
+  EKF_TLIO }` + `@Volatile var ekfMode` 추가. `start()` 의 `EkfBridge.create`
+  가 mode 별 params 적용. `runInferStep` 의 RotVec DR 우회 조건에
+  `&& ekfMode == PATH_B` 추가 — EKF 모드일 때는 경로 A 강제 활성.
+- `MainActivity.kt`: 메뉴 → "EKF 모드 (비교용)" → AlertDialog 라디오 3 옵션.
+  `exportPath()` 의 파일명을 `track_<mode>_<ts>.csv` 로, 헤더에 `# mode=...`.
+- `tools/overlay_tracks.py` (신설): 두 CSV 를 한 그래프에 겹쳐 비교 + 경로
+  길이/종점 폐합 표.
+
+기본 데모는 변경 없음 (PATH_B 기본). 비교 측정 시에만 EKF_CURRENT /
+EKF_TLIO 로 전환해 같은 경로를 두 번 보행 → adb pull → 외부 비교.
+
 ## 9. 현재 커밋 상태
 
 ```
+(P60) 단말 EKF 모드 토글 + 모드별 trackPoints CSV export + overlay_tracks.py
 (P59) compare_tlio_ekf.py + imu_ekf_py.py — TLIO 논문 EKF 계수 오프라인 비교 도구
 (P58) carryMode 표시를 메인 UI → IMU 진단 화면으로 이동 (sharedInstance 패턴)
 a63dcbc P57  HANDHELD-only 정합화 (soft-switching 제거, 분류기 표시 전용)

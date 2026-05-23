@@ -347,6 +347,23 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         private const val HANDHELD_SPEED_SCALE = 1.5
 
         // ────────────────────────────────────────────────────────────
+        // [P60] EKF 비교 모드 (단말 토글) — 모드별 EKF 계수 비교용
+        //
+        // 데모 기본은 PATH_B (RotVec DR + PDR-hybrid, EKF 미사용).
+        // 비교 측정 시에는 EKF_CURRENT / EKF_TLIO 중 하나로 전환해 *경로 A
+        // (논문 EKF)* 를 활성화하고, EkfBridge.create() 에 모드별 cfg 파라미터
+        // 를 전달한다. 식·gate(χ²=11.345, MAX_INNOV_NORM=3.0)는 두 모드 모두
+        // 동일하며, cfg 만 다르다(init_vel/init_ba/meascov_scale).
+        //
+        // 한 번 보행 → exportPath() 로 trackPoints CSV 저장 → 다른 모드로 다시
+        // 보행 → 두 CSV 를 tools/overlay_tracks.py 로 한 그래프에 겹쳐 비교.
+        enum class EkfMode { PATH_B, EKF_CURRENT, EKF_TLIO }
+
+        /** 런타임 변경 가능(MainActivity 메뉴). 기본 = 데모 경로 B. */
+        @Volatile
+        var ekfMode: EkfMode = EkfMode.PATH_B
+
+        // ────────────────────────────────────────────────────────────
         // [P58] Activity 간 ViewModel 공유 — IMU 진단 화면에서 측위 상태 구독용.
         //
         // MainActivity 의 ViewModelProvider 가 만든 인스턴스를 다른 Activity
@@ -539,8 +556,17 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             }
             _state.value = _state.value.copy(calibrating = false, calibProgress = 1f)
 
+            // [P60] EKF 생성 — ekfMode 별 cfg 파라미터 적용.
+            //   PATH_B / EKF_CURRENT : DEFAULT_PARAMS (단말 기본)
+            //   EKF_TLIO            : TLIO_PARAMS    (논문 §V-D/§V-E 계수)
+
             // EKF ?앹꽦 (罹섎━釉뚮젅?댁뀡 ?꾨즺 ??
-            EkfBridge.create()
+            val ekfCfgEnum = when (ekfMode) {
+                EkfMode.EKF_TLIO -> EkfBridge.EkfCfg.TLIO
+                else             -> EkfBridge.EkfCfg.CURRENT
+            }
+            Log.i(TAG, "[P60] EKF cfg = ${ekfMode.name} (${ekfCfgEnum.name})")
+            EkfBridge.create(EkfBridge.paramsFor(ekfCfgEnum))
 
             // ?? ??EKF ?꾪뙆 猷⑦봽 (5ms ?대쭅, 紐⑤뱺 100Hz ?섑뵆 泥섎━) ??
             propJob = viewModelScope.launch(Dispatchers.Default) {
@@ -686,7 +712,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         if (!inferEngine.isLoaded())    return
 
         // [P53] RotVec dead-reckoning 경로 — EKF 클론/update 흐름 완전 우회.
-        if (USE_ROTVEC_DR) {
+        // [P60] ekfMode 가 EKF_CURRENT/EKF_TLIO 면 *EKF 경로* 강제 활성화.
+        //       PATH_B (기본, 데모) 일 때만 RotVec DR 로 우회.
+        if (USE_ROTVEC_DR && ekfMode == EkfMode.PATH_B) {
             runRotVecDrStep()
             return
         }

@@ -282,6 +282,15 @@
            --model_dir src/Network/out_classifier2 \
            --android latest.csv --plot logs/tlio_compare.png
 
+  9.5. 단말에서 모드별 trackPoints 측정 → 외부 overlay (P60)
+       앱: 메뉴 → "EKF 모드 (비교용)" → EKF_CURRENT 선택 → 시작 → 보행 →
+            정지 → 메뉴 → 경로 내보내기 (track_EKF_CURRENT_<ts>.csv 저장)
+       앱: 다시 EKF_TLIO 로 같은 경로 보행 → 두 번째 CSV 저장
+       PC: adb pull ... → 두 CSV 를 한 그래프에 겹치기:
+         python tools/overlay_tracks.py \
+           track_EKF_CURRENT_*.csv  track_EKF_TLIO_*.csv \
+           --out logs/ekf_mode_overlay.png
+
 
 ================================================================
  10. Logcat 으로 동작 검증

@@ -6,6 +6,7 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
@@ -111,8 +112,41 @@ class MainActivity : AppCompatActivity() {
                 exportPath()
                 true
             }
+            R.id.action_ekf_mode -> {
+                showEkfModeDialog()
+                true
+            }
             else -> super.onOptionsItemSelected(item)
         }
+    }
+
+    /**
+     * [P60] EKF 모드 선택 다이얼로그.
+     *  PATH_B       : 데모 기본 (RotVec DR + PDR-hybrid, EKF 미사용).
+     *  EKF_CURRENT  : 경로 A — 단말 현재 cfg (DEFAULT_PARAMS).
+     *  EKF_TLIO     : 경로 A — TLIO 논문 §V-D/§V-E cfg (TLIO_PARAMS).
+     *
+     * 측위 실행 중 변경 시: 다음 [시작] 부터 새 모드 적용 (현재 세션 영향 없음).
+     */
+    private fun showEkfModeDialog() {
+        val modes  = LocalizationViewModel.EkfMode.values()
+        val labels = arrayOf(
+            "PATH_B (데모 기본, RotVec DR)",
+            "EKF_CURRENT (경로 A, 단말 cfg)",
+            "EKF_TLIO (경로 A, TLIO 논문 cfg)"
+        )
+        val cur = LocalizationViewModel.ekfMode.ordinal
+        AlertDialog.Builder(this)
+            .setTitle("EKF 모드 (비교용)")
+            .setSingleChoiceItems(labels, cur) { dlg, which ->
+                LocalizationViewModel.ekfMode = modes[which]
+                Toast.makeText(this,
+                    "다음 [시작] 부터 적용: ${modes[which].name}",
+                    Toast.LENGTH_SHORT).show()
+                dlg.dismiss()
+            }
+            .setNegativeButton("닫기", null)
+            .show()
     }
 
     /**
@@ -147,12 +181,18 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "경로 데이터가 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
-        // CSV 형식으로 저장
+        // [P60] 헤더에 모드 메타 + 파일명에 mode 토큰 — 외부 비교 도구가 자동 인식.
+        val mode = LocalizationViewModel.ekfMode.name
         val csv = buildString {
+            appendLine("# mode=$mode")
+            appendLine("# n_points=${points.size}")
             appendLine("x_m,y_m")
             points.forEach { (x, y) -> appendLine("$x,$y") }
         }
-        val file = java.io.File(getExternalFilesDir(null), "track_${System.currentTimeMillis()}.csv")
+        val file = java.io.File(
+            getExternalFilesDir(null),
+            "track_${mode}_${System.currentTimeMillis()}.csv"
+        )
         file.writeText(csv)
         Toast.makeText(this, "경로 저장: ${file.name}", Toast.LENGTH_LONG).show()
     }

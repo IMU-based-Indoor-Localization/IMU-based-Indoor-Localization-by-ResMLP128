@@ -9,4 +9,8 @@
         android:id="@+id/action_export"
         android:title="경로 내보내기"
         app:showAsAction="never"/>
+    <item
+        android:id="@+id/action_ekf_mode"
+        android:title="EKF 모드 (비교용)"
+        app:showAsAction="never"/>
 </menu>

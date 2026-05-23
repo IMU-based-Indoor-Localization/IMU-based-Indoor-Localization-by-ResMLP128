@@ -48,6 +48,37 @@ object EkfBridge {
         10.0                     // [11] meascov_scale 기본값 — P15: 1.0 → 10.0 원복
     )
 
+    // ── [P60] TLIO 논문 §V-D/§V-E 계수 (비교 모드 EKF_TLIO 용) ─────
+    // 식·게이트(χ²=11.345, MAX_INNOV_NORM=3.0)는 imu_ekf.cpp 그대로 두고
+    // *cfg 만* TLIO 값으로 교체. DEFAULT_PARAMS 와 다른 항목:
+    //   [6]  init_vel_sigma  : 1.0   → 0.1   m/s   (TLIO §V-E)
+    //   [9]  init_ba_sigma   : 0.02  → 0.2   m/s²  (TLIO §V-E)
+    //   [11] meascov_scale   : 10.0  → 10.0  (이미 동일 — TLIO §V-D)
+    // 나머지(σ_θ, σ_y, σ_bg, process noise) 는 두 cfg 가 같다.
+    private val TLIO_PARAMS = doubleArrayOf(
+        sqrt(1e-3),              // sigma_na
+        sqrt(1e-4),              // sigma_ng
+        1e-4,                    // ita_ba
+        1e-6,                    // ita_bg
+        10.0 / 180.0 * Math.PI, // init_attitude_sigma
+        0.1  / 180.0 * Math.PI, // init_yaw_sigma
+        0.1,                     // init_vel_sigma   ← TLIO
+        0.001,                   // init_pos_sigma
+        0.0001,                  // init_bg_sigma
+        0.2,                     // init_ba_sigma   ← TLIO
+        9.81,                    // g_norm
+        10.0                     // meascov_scale (TLIO §V-D)
+    )
+
+    /** [P60] EKF 비교 모드 — 둘 다 같은 식·gate, cfg 만 다름. */
+    enum class EkfCfg { CURRENT, TLIO }
+
+    fun paramsFor(cfg: EkfCfg): DoubleArray =
+        when (cfg) {
+            EkfCfg.CURRENT -> DEFAULT_PARAMS
+            EkfCfg.TLIO    -> TLIO_PARAMS
+        }
+
     // ── Context-Aware Adaptive EKF 파라미터 테이블 ────────────
     // 논문 §4.3.2 Table 기반 설계 원칙:
     //   Running    : Q↑ R↑   (격한 움직임 → 모델 불확실성 및 측정 노이즈 증가)
