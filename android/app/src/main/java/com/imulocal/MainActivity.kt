@@ -1,11 +1,14 @@
 package com.imulocal
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.ViewModelProvider
@@ -23,6 +26,67 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var viewModel: LocalizationViewModel
+
+    /**
+     * [P63] SAF (Storage Access Framework) 기반 CSV 선택기.
+     *
+     * 동작: 시스템 파일 선택기 → 단말 *어디서든* CSV 선택 → URI → cacheDir
+     *      임시 파일 복사 → viewModel.start(replayCsv = tempFile) 호출.
+     *
+     * `imu_csv/` 디렉토리 한정이었던 P62 와 달리 Downloads, Documents,
+     * SD 카드, USB OTG, Google Drive(content provider) 등 SAF 가 지원하는
+     * 모든 위치에서 CSV 선택 가능.
+     *
+     * 표준 패턴: registerForActivityResult 는 onCreate *전* 호출되어야 하므로
+     * class field 로 선언한다.
+     */
+    private val pickReplayCsv = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri == null) return@registerForActivityResult
+        try {
+            val display = queryDisplayName(uri) ?: "picked.csv"
+            val safe = display.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            val tempFile = java.io.File(
+                cacheDir,
+                "replay_picked_${System.currentTimeMillis()}_$safe"
+            )
+            contentResolver.openInputStream(uri)?.use { input ->
+                tempFile.outputStream().use { output -> input.copyTo(output) }
+            } ?: run {
+                Toast.makeText(this, "CSV 열기 실패 (InputStream null)",
+                    Toast.LENGTH_LONG).show()
+                return@registerForActivityResult
+            }
+            if (!tempFile.exists() || tempFile.length() == 0L) {
+                Toast.makeText(this, "CSV 복사 결과가 비어 있습니다.",
+                    Toast.LENGTH_LONG).show()
+                return@registerForActivityResult
+            }
+            val sizeKb = tempFile.length() / 1024
+            Toast.makeText(
+                this,
+                "Replay 시작: $display (${sizeKb} KB)",
+                Toast.LENGTH_SHORT
+            ).show()
+            viewModel.start(replayCsv = tempFile)
+        } catch (e: Exception) {
+            Toast.makeText(
+                this,
+                "CSV 로드 실패: ${e.javaClass.simpleName}: ${e.message}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        return try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME),
+                null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        } catch (e: Exception) { null }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -114,6 +178,18 @@ class MainActivity : AppCompatActivity() {
             }
             R.id.action_ekf_mode -> {
                 showEkfModeDialog()
+                true
+            }
+            R.id.action_replay_pick -> {
+                // [P63] SAF 시스템 파일 선택기 호출.
+                //   MIME: text/csv 가 1순위, comma-separated-values 보조,
+                //         단말이 CSV 를 octet-stream 으로 분류한 경우 대비 */*.
+                pickReplayCsv.launch(arrayOf(
+                    "text/csv",
+                    "text/comma-separated-values",
+                    "text/plain",
+                    "*/*"
+                ))
                 true
             }
             else -> super.onOptionsItemSelected(item)

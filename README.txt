@@ -213,6 +213,16 @@
     LocalizationViewModel.start(replayCsv = File(...)) 로 재생 가능.
     수집-측위 분리 검증에 사용.
 
+    재생 방법 2가지:
+      1) [Replay (latest.csv 재생)] 버튼
+         · imu_csv/replay/latest.csv 자동 재생
+         · adb push 흐름 사용 시 편리
+      2) 메뉴 → "Replay (휴대폰 CSV 선택)"  [P63]
+         · 안드로이드 시스템 파일 선택기(SAF) 호출
+         · 단말 어디든(Downloads, Documents, SD 카드, USB OTG,
+           Google Drive content provider 등) CSV 선택 가능
+         · 선택한 파일은 cacheDir 에 임시 복사 후 Replay 시작
+
 
   8.1. 알려진 한계 (정직)
   -----------------------
