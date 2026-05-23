@@ -163,6 +163,51 @@
         </LinearLayout>
     </androidx.cardview.widget.CardView>
 
+    <!-- [P58] 분류기(휴대 방식) 진단 카드 — MainActivity 의 측위가 실행 중일 때만 갱신.
+         데모는 HANDHELD 자세 한정이며 분류기 출력은 위치 계산에 사용되지 않음
+         (표시 전용, README.txt §8.1 / docs/HANDOFF_P56.md §8 참고). -->
+    <androidx.cardview.widget.CardView
+        xmlns:app="http://schemas.android.com/apk/res-auto"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        app:cardElevation="2dp"
+        app:cardCornerRadius="8dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="14dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="휴대 방식 분류기 (표시 전용)"
+                android:textSize="13sp"
+                android:textColor="#757575"
+                android:layout_marginBottom="6dp"/>
+
+            <TextView
+                android:id="@+id/tvCarryMode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="측위 미실행 — 메인 화면에서 시작하세요"
+                android:textSize="15sp"
+                android:fontFamily="monospace"
+                android:textColor="#212121"/>
+
+            <TextView
+                android:id="@+id/tvCarryNote"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="데모는 HANDHELD 자세 한정. 위치 계산에는 사용되지 않습니다."
+                android:textSize="12sp"
+                android:textColor="#9E6B00"
+                android:layout_marginTop="4dp"/>
+        </LinearLayout>
+    </androidx.cardview.widget.CardView>
+
     <!-- 버튼 -->
     <LinearLayout
         android:layout_width="match_parent"

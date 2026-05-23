@@ -218,7 +218,10 @@ P56 실측 결과 (latest.csv 5 m 왕복):
 ## 9. 현재 커밋 상태
 
 ```
-9cda565 docs(README): P56 최신 상태 헤더 추가 (※ 본 문서로 대체 예정)
+(P58) carryMode 표시를 메인 UI → IMU 진단 화면으로 이동 (sharedInstance 패턴)
+a63dcbc P57  HANDHELD-only 정합화 (soft-switching 제거, 분류기 표시 전용)
+4857c93 docs  README 슬림화 + HANDOFF_P56.md 분리
+9cda565 docs(README): P56 최신 상태 헤더 추가 (※ 4857c93 으로 대체됨)
 b9a137f 정리: out_resnet*/ 학습 산출물 제거
 db6db2f P56  소프트 스위칭 + 범례 단일화
 fc665dc P55  20Hz 속도 적분 (추적 연속성 복원)

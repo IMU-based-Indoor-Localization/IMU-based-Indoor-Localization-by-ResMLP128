@@ -134,12 +134,8 @@
                         android:textSize="13sp"
                         android:layout_marginTop="4dp"/>
 
-                    <TextView android:id="@+id/tvCarryMode"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="휴대 방식: unknown (0%) — 표시 전용"
-                        android:textSize="13sp"
-                        android:layout_marginTop="4dp"/>
+                    <!-- [P58] 휴대 방식(분류기 출력) 은 IMU 측정 진단 화면으로 이동.
+                         메뉴 → IMU 센서 진단 에서 측위 실행 중 확인 가능. -->
 
                     <TextView android:id="@+id/tvLatency"
                         android:layout_width="match_parent"

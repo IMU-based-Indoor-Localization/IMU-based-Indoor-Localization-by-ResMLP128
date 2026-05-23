@@ -345,6 +345,30 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // 향후 휴대모드별 실측 보정 데이터가 확보되면 그때 다시 가중 스위칭
         // 구조를 복원한다 (git history 의 P56 커밋 참조).
         private const val HANDHELD_SPEED_SCALE = 1.5
+
+        // ────────────────────────────────────────────────────────────
+        // [P58] Activity 간 ViewModel 공유 — IMU 진단 화면에서 측위 상태 구독용.
+        //
+        // MainActivity 의 ViewModelProvider 가 만든 인스턴스를 다른 Activity
+        // (ImuTestActivity 등) 에서 읽을 수 있도록 약한 참조로 노출한다.
+        // 분류기 출력(carryMode/carryProb) 표시를 메인 UI 에서 빼서 진단 쪽으로
+        // 이전한 결과(P58).
+        //
+        // 동시 다중 인스턴스가 만들어지는 시나리오는 없으나(MainActivity 1개),
+        // 안전을 위해 init 등록 / onCleared 해제로 lifecycle 매칭.
+        @Volatile
+        var sharedInstance: LocalizationViewModel? = null
+            private set
+    }
+
+    init {
+        // 가장 최근 생성된 인스턴스를 노출 (Activity 간 state 공유용).
+        sharedInstance = this
+    }
+
+    override fun onCleared() {
+        if (sharedInstance === this) sharedInstance = null
+        super.onCleared()
     }
 
     // ?? ?섏〈 而댄룷?뚰듃 ????????????????????????????????????????????

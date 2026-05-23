@@ -68,10 +68,8 @@ class MainActivity : AppCompatActivity() {
                         s.velocity.third  * s.velocity.third
                     )
                 )
-                // [P57] 휴대 방식 — 표시 전용(위치 계산엔 사용 안 함).
-                // 데모는 HANDHELD 자세 한정. docs/HANDOFF_P56.md §8 참고.
-                binding.tvCarryMode.text =
-                    "휴대 방식: ${s.carryMode}  (${(s.carryProb * 100).toInt()}%) — 표시 전용"
+                // [P58] 휴대 방식(분류기 출력) 은 IMU 측정 진단 화면으로 이동.
+                //  메뉴 → IMU 센서 진단 에서 측위 실행 중 확인 가능.
 
                 // 추론 latency
                 binding.tvLatency.text = "추론 지연: ${s.inferLatency} ms"

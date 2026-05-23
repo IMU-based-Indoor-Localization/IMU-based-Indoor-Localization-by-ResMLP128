@@ -11,7 +11,12 @@ import android.view.MenuItem
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.button.MaterialButton
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
 import java.io.BufferedWriter
 import java.io.File
 import java.io.IOException
@@ -78,6 +83,8 @@ class ImuTestActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var tvSampleRate:   TextView
     private lateinit var tvSampleCount:  TextView
     private lateinit var tvWindowReady:  TextView
+    // [P58] 분류기(휴대 방식) 표시 — MainActivity 측위 ViewModel state 구독.
+    private lateinit var tvCarryMode:    TextView
     private lateinit var btnStart:       MaterialButton
     private lateinit var btnStop:        MaterialButton
 
@@ -106,8 +113,34 @@ class ImuTestActivity : AppCompatActivity(), SensorEventListener {
         tvSampleRate  = findViewById(R.id.tvSampleRate)
         tvSampleCount = findViewById(R.id.tvSampleCount)
         tvWindowReady = findViewById(R.id.tvWindowReady)
+        tvCarryMode   = findViewById(R.id.tvCarryMode)
         btnStart      = findViewById(R.id.btnTestStart)
         btnStop       = findViewById(R.id.btnTestStop)
+
+        // [P58] MainActivity 측위 ViewModel 의 state 를 구독해 분류기 출력 표시.
+        //  - 측위가 켜지지 않았으면 sharedInstance 가 null 이거나 isRunning=false →
+        //    "측위 미실행" 안내 유지.
+        //  - Activity 가 STARTED 상태일 때만 collect (메모리 누수 방지).
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                val vm = LocalizationViewModel.sharedInstance
+                if (vm == null) {
+                    tvCarryMode.text = "측위 미실행 — 메인 화면에서 시작하세요"
+                    return@repeatOnLifecycle
+                }
+                vm.state.collectLatest { s ->
+                    tvCarryMode.text = if (s.isRunning) {
+                        String.format(
+                            "%s  (%d%%)",
+                            s.carryMode,
+                            (s.carryProb * 100).toInt()
+                        )
+                    } else {
+                        "측위 미실행 — 메인 화면에서 시작하세요"
+                    }
+                }
+            }
+        }
 
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         accelSensor   = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
