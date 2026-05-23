@@ -4,6 +4,10 @@
 > 그리고 그에 따른 *현재 어플리케이션 결정사항* 을 정리한다. 현재 앱 구조와
 > 사용법은 `README.txt` 본문을, P40 이전 상세는 `docs/HANDOFF_P39.md`,
 > `docs/HANDOFF_P40.md`, `docs/HANDOFF_P44.md`, `docs/HANDOFF_P46.md` 를 참조.
+>
+> **PATH_B 채택 근거 (한계/장점/학술적 위치)** 의 정식 정리는
+> `docs/PATH_B_RATIONALE.md`, **자세별 EKF/PDR 분기 구상** 은
+> `docs/POSE_SWITCHING_PLAN.md` 를 참조.
 
 ## 0. 한 줄 결론
 

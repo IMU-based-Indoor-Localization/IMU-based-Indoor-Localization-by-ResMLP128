@@ -333,11 +333,13 @@
   변경 이력 / 진행 기록 / 폐기된 시도 / RoNIN 트랙 / 도메인 갭
   결론 등은 다음 문서에 정리되어 있다.
 
-    docs/HANDOFF_P56.md    P40 이후 ~ 현재(P56) 까지의 변경 기록
-    docs/HANDOFF_P46.md    P40 ~ P46 핸드오프 스냅샷
-    docs/HANDOFF_P44.md    P40 ~ P44 핸드오프 스냅샷
-    docs/HANDOFF_P40.md    P40 시점 크래시 해결 기록
-    docs/HANDOFF_P39.md    P22 ~ P39 핸드오프 스냅샷
+    docs/PATH_B_RATIONALE.md    ★ PATH_B 채택 근거 (한계/장점/학술적 위치)
+    docs/POSE_SWITCHING_PLAN.md ★ 자세별 EKF/PDR 분기 구상안
+    docs/HANDOFF_P56.md         P40 이후 ~ 현재(P56) 까지의 변경 기록
+    docs/HANDOFF_P46.md         P40 ~ P46 핸드오프 스냅샷
+    docs/HANDOFF_P44.md         P40 ~ P44 핸드오프 스냅샷
+    docs/HANDOFF_P40.md         P40 시점 크래시 해결 기록
+    docs/HANDOFF_P39.md         P22 ~ P39 핸드오프 스냅샷
 
   Git log:
     git log --oneline   (P40 이전 상세 커밋은 docs/HANDOFF_P39 참조)
