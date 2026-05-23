@@ -374,6 +374,25 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         var ekfMode: EkfMode = EkfMode.PATH_B
 
         // ────────────────────────────────────────────────────────────
+        // [P61] EKF measurement 를 PDR-hybrid 로 교체
+        //
+        // P60 의 EKF_CURRENT/EKF_TLIO 비교에서 두 모드 모두 모델 disp 의
+        // *방향* 채널을 그대로 measurement 로 받았다. Android 도메인 갭으로
+        // 그 방향 자체가 OoD → EKF 가 잘못된 방향을 흡수해 발산 → cfg 차이
+        // 비교가 무의미한 수준이었다.
+        //
+        // P61: EKF measurement 를 PATH_B 식으로 교체.
+        //   1) 모델 disp 의 크기만 사용 (|disp_xy|, disp_z 그대로)
+        //   2) 진행 방향은 rotVec heading (자력계 융합 절대 방위)
+        //   3) world frame 변위 → begin-clone yaw frame 으로 재투영해 EKF 에 입력
+        //
+        // 효과: EKF 가 받는 변위가 *방향까지 정합* 되어 발산 가능성 ↓.
+        // 그 위에서 init_vel/init_ba/meascov_scale 의 cfg 차이가 의미 있게 비교됨.
+        //
+        // 토글: false 면 P60 의 원본 disp_ga 측정으로 회귀(역사 비교용).
+        private val USE_PDR_MEAS_FOR_EKF = true
+
+        // ────────────────────────────────────────────────────────────
         // [P58] Activity 간 ViewModel 공유 — IMU 진단 화면에서 측위 상태 구독용.
         //
         // MainActivity 의 ViewModelProvider 가 만든 인스턴스를 다른 Activity
@@ -926,11 +945,29 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         EkfBridge.applySoftSwitching(result.clsProb)
 
         // ??蹂??痢≪젙媛?+ 怨듬텇??援ъ꽦
-        val meas = doubleArrayOf(
-            result.disp[0].toDouble(),
-            result.disp[1].toDouble(),
-            result.disp[2].toDouble()
-        )
+        // [P61] PDR-hybrid measurement — EKF 가 받는 disp 의 *방향* 을 PATH_B 식으로
+        //   교체. 모델 disp 크기 + rotVec heading → world 변위 → begin-clone yaw frame
+        //   재투영. Android OoD 인 모델 disp 방향 채널을 EKF 가 흡수해 발산하는 문제 차단.
+        val rawDx = result.disp[0].toDouble()
+        val rawDy = result.disp[1].toDouble()
+        val rawDz = result.disp[2].toDouble()
+        val meas: DoubleArray = if (USE_PDR_MEAS_FOR_EKF) {
+            val xyMag = sqrt(rawDx * rawDx + rawDy * rawDy)
+            val headingW = imuCollector.getLatestYawRad().toDouble()
+            val dxW = xyMag * cos(headingW)
+            val dyW = xyMag * sin(headingW)
+            val yawBegin = if (R_begin.size == 9) atan2(R_begin[3], R_begin[0]) else 0.0
+            val cz = cos(yawBegin); val sz = sin(yawBegin)
+            val dxGa =  cz * dxW + sz * dyW
+            val dyGa = -sz * dxW + cz * dyW
+            Log.v(TAG, "[P61-PDR] |xy|=${"%.3f".format(xyMag)} " +
+                       "head=${"%.1f".format(Math.toDegrees(headingW))} " +
+                       "yawBegin=${"%.1f".format(Math.toDegrees(yawBegin))} " +
+                       "meas_ga=[${"%.3f".format(dxGa)},${"%.3f".format(dyGa)},${"%.3f".format(rawDz)}]")
+            doubleArrayOf(dxGa, dyGa, rawDz)
+        } else {
+            doubleArrayOf(rawDx, rawDy, rawDz)
+        }
         val cov = buildCovMatrix(result.dispCov)
         // [DEBUG-5 revert] 사용자 평가 = 사진 시점 (DEBUG-5 *없는* 상태) 이 baseline.
         // z drift fix 는 별도 후속 commit 또는 다음 세션 검증 후 재도입 예정.

@@ -252,9 +252,29 @@ EKF_TLIO 로 전환해 같은 경로를 두 번 보행 → adb pull → 외부 �
 같은 ekfMode 토글을 따른다. 같은 IMU CSV 를 두 모드로 재생하면 *입력이
 완전히 동일* → cfg 효과만 격리되어 가장 깔끔한 단말 비교가 된다.
 
+## 8.7 EKF measurement 를 PDR-hybrid 로 교체 (P61, 2026-05-23)
+
+P60 으로 단말에서 EKF_CURRENT/EKF_TLIO 비교가 가능해졌으나 두 모드 모두
+모델 disp 의 *방향* 채널을 EKF measurement 로 그대로 받아 발산 → cfg 차이
+비교가 무의미한 수준이었다 (사용자 보고).
+
+P61: `LocalizationViewModel.runInferStep` 의 EKF 측 measurement 생성을 PATH_B
+식으로 교체:
+- `xyMag = |model disp_xy|`
+- `headingW = imuCollector.getLatestYawRad()` (rotVec 절대 yaw)
+- `dWorld  = xyMag × (cos headingW, sin headingW, 0)` (+ disp_z)
+- `meas_ga = R_z(yawBegin)^T × dWorld` (begin-clone yaw frame)
+
+`USE_PDR_MEAS_FOR_EKF = true` 기본. false 면 P60 의 원본 disp_ga measurement
+로 회귀(역사 비교용).
+
+효과: EKF 가 받는 변위가 *방향까지 정합* 되어 발산 가능성 ↓. cfg 차이
+(init_vel/init_ba/meascov_scale) 가 정상 범위에서 비교 가능.
+
 ## 9. 현재 커밋 상태
 
 ```
+(P61) EKF measurement 를 PATH_B 식 PDR-hybrid 로 교체 (USE_PDR_MEAS_FOR_EKF)
 (P60) 단말 EKF 모드 토글 + 모드별 trackPoints CSV export + overlay_tracks.py
 (P59) compare_tlio_ekf.py + imu_ekf_py.py — TLIO 논문 EKF 계수 오프라인 비교 도구
 (P58) carryMode 표시를 메인 UI → IMU 진단 화면으로 이동 (sharedInstance 패턴)

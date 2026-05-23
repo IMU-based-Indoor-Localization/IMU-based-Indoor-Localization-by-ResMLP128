@@ -102,6 +102,10 @@
   HANDHELD_SPEED_SCALE     1.5         HANDHELD 단일 속도 스케일
                                        (P57: per-class 소프트 스위칭
                                         제거, 분류기 출력은 표시 전용)
+  USE_PDR_MEAS_FOR_EKF     true        [P61] EKF measurement 를 PATH_B 식
+                                       (rotVec heading × |모델 disp|) 으로
+                                       교체. EKF 모드(EKF_CURRENT/EKF_TLIO)
+                                       에서만 활성 — PATH_B 와 무관.
   WARMUP_DURATION_MS       3000        캘리브 후 워밍업 (궤적 미표시)
 
 
