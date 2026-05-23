@@ -75,6 +75,14 @@ import kotlin.math.sqrt
  */
 class LocalizationViewModel(application: Application) : AndroidViewModel(application) {
 
+    /**
+     * [P60] EKF 비교 모드 — class 본문 nested enum.
+     *  PATH_B       : 데모 기본. RotVec DR + PDR-hybrid (EKF 미사용).
+     *  EKF_CURRENT  : 경로 A — 단말 현재 cfg (EkfBridge.DEFAULT_PARAMS).
+     *  EKF_TLIO     : 경로 A — TLIO 논문 §V-D/§V-E cfg (EkfBridge.TLIO_PARAMS).
+     */
+    enum class EkfMode { PATH_B, EKF_CURRENT, EKF_TLIO }
+
     companion object {
         private const val TAG = "LocalizationVM"
 
@@ -357,7 +365,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //
         // 한 번 보행 → exportPath() 로 trackPoints CSV 저장 → 다른 모드로 다시
         // 보행 → 두 CSV 를 tools/overlay_tracks.py 로 한 그래프에 겹쳐 비교.
-        enum class EkfMode { PATH_B, EKF_CURRENT, EKF_TLIO }
+        // (enum 정의는 외부 Activity 가 `LocalizationViewModel.EkfMode` 로 직접
+        //  참조하도록 class 본문 nested 로 둠 — companion 안에 두면
+        //  `Companion.EkfMode` 거쳐야 해서 호출부가 복잡해진다.)
 
         /** 런타임 변경 가능(MainActivity 메뉴). 기본 = 데모 경로 B. */
         @Volatile
