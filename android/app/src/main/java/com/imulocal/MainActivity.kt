@@ -116,8 +116,66 @@ class MainActivity : AppCompatActivity() {
                 showEkfModeDialog()
                 true
             }
+            R.id.action_replay_pick -> {
+                showReplayPicker()
+                true
+            }
             else -> super.onOptionsItemSelected(item)
         }
+    }
+
+    /**
+     * [P62] Replay CSV 선택 다이얼로그.
+     *  - getExternalFilesDir(null)/imu_csv/ 하위 (재귀) 모든 .csv 파일 자동 나열.
+     *  - 최근 수정 순 정렬. 파일명 + 상대경로 + 크기 표시.
+     *  - 선택 시 viewModel.start(replayCsv=file) 호출.
+     *
+     * 포함 대상 (둘 다 같은 다이얼로그):
+     *   - imu_csv/imu_record_*.csv   (ImuTestActivity 가 저장)
+     *   - imu_csv/replay/latest.csv  (adb push 한 파일)
+     *   - imu_csv/**/*.csv           (사용자가 임의 위치에 둔 파일)
+     */
+    private fun showReplayPicker() {
+        val baseDir = java.io.File(getExternalFilesDir(null), "imu_csv")
+        val files = mutableListOf<java.io.File>()
+        fun scan(d: java.io.File) {
+            if (!d.isDirectory) return
+            d.listFiles()?.forEach {
+                if (it.isDirectory) scan(it)
+                else if (it.extension.equals("csv", ignoreCase = true)) files.add(it)
+            }
+        }
+        scan(baseDir)
+        if (files.isEmpty()) {
+            Toast.makeText(
+                this,
+                "imu_csv/ 디렉토리에 CSV 파일이 없습니다.\n" +
+                "PC: adb push ... 로 추가하거나\n" +
+                "IMU 진단에서 수집 시작 후 정지하여 저장하세요.\n" +
+                "경로: ${baseDir.absolutePath}",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        files.sortByDescending { it.lastModified() }
+        val labels = files.map { f ->
+            val sizeKb = f.length() / 1024
+            val rel = f.relativeTo(baseDir).path
+            "$rel  (${sizeKb} KB)"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Replay CSV 선택 (${files.size}개)")
+            .setItems(labels) { _, which ->
+                val file = files[which]
+                Toast.makeText(
+                    this,
+                    "Replay 시작: ${file.name}",
+                    Toast.LENGTH_SHORT
+                ).show()
+                viewModel.start(replayCsv = file)
+            }
+            .setNegativeButton("취소", null)
+            .show()
     }
 
     /**
