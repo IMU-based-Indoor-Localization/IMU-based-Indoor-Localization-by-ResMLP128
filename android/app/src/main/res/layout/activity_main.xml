@@ -98,13 +98,15 @@
             android:background="#FFFFFF"
             android:elevation="1dp"/>
 
-        <!-- 지도 모드 (토글 시 visible) -->
+        <!-- 지도 모드 (토글 시 visible). [P68-5 fix] gone 대신 invisible 사용 —
+             gone 은 view measure 자체를 건너뛰어 onMapReady 시점에 카메라 위치 설정이
+             무시될 수 있다. invisible 은 공간 점유하지만 안 보임 (Map 정상 init). -->
         <fragment
             android:id="@+id/map"
             android:name="com.naver.maps.map.MapFragment"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:visibility="gone"/>
+            android:visibility="invisible"/>
     </FrameLayout>
 
     <!-- 정보 + 버튼 카드 (두 모드 공통, 항상 하단) -->

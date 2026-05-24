@@ -13,6 +13,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import com.imulocal.databinding.ActivityMainBinding
 import com.naver.maps.map.CameraAnimation
+import com.naver.maps.map.CameraPosition
 import com.naver.maps.map.CameraUpdate
 import com.naver.maps.map.MapFragment
 import com.naver.maps.map.NaverMap
@@ -132,18 +133,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    // [P68-4] Naver Map 준비 콜백
+    // [P68-4 / fix] Naver Map 준비 콜백
     override fun onMapReady(map: NaverMap) {
         naverMap = map
-        // 백석역 으로 카메라 자동 이동 + 줌 18 (역 근접 보기)
-        if (!cameraMoved) {
-            map.moveCamera(
-                CameraUpdate.scrollTo(LocalizationViewModel.DEFAULT_ANCHOR)
-                    .animate(CameraAnimation.Easing, 500)
-            )
-            map.moveCamera(CameraUpdate.zoomTo(18.0))
-            cameraMoved = true
-        }
+        // [P68-5 fix] 카메라 이동 — CameraPosition 단일 설정 (이전 moveCamera 2회 호출 race
+        //   해소). onMapReady 시점에 fragment view 가 measure 안 됐어도 cameraPosition 직접
+        //   설정은 즉시 반영됨.
+        moveCameraToAnchor()
         // 이미 누적된 path 가 있으면 즉시 표시
         pathPolyline.map = map
         viewModel.state.value.pathLatLng.let { pts ->
@@ -151,6 +147,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 pathPolyline.coords = pts
                 lastPathSize = pts.size
             }
+        }
+    }
+
+    /** [P68-5 fix] 백석역 카메라 이동 — onMapReady + 지도 모드 전환 시 양쪽에서 호출. */
+    private fun moveCameraToAnchor() {
+        naverMap?.let { m ->
+            m.cameraPosition = CameraPosition(LocalizationViewModel.DEFAULT_ANCHOR, 18.0)
+            cameraMoved = true
         }
     }
 
@@ -194,12 +198,16 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private fun toggleView(menuItem: MenuItem) {
         isMapMode = !isMapMode
         if (isMapMode) {
-            binding.trackView.visibility = View.GONE
+            // [P68-5 fix] TrackView 를 INVISIBLE 로 → Map fragment(아래쪽 z-order)가 보임.
+            //   GONE 사용 시 layout 재계산으로 map view 가 resize 되어 카메라 reset 가능.
+            binding.trackView.visibility = View.INVISIBLE
             findViewById<View>(R.id.map)?.visibility = View.VISIBLE
             menuItem.title = "표시 모드: 지도 → 격자"
+            // 지도 모드로 전환 시 카메라 강제 재이동 (안전망)
+            moveCameraToAnchor()
         } else {
             binding.trackView.visibility = View.VISIBLE
-            findViewById<View>(R.id.map)?.visibility = View.GONE
+            findViewById<View>(R.id.map)?.visibility = View.INVISIBLE
             menuItem.title = "표시 모드: 격자 → 지도"
         }
     }
