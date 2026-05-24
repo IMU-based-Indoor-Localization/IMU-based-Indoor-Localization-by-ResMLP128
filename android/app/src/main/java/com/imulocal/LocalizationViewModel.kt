@@ -388,9 +388,15 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //
         // ADAPTIVE_SCALE_THRESH 의 i 번째 미만 → ADAPTIVE_SCALE_VALUES[i] 적용.
         // 임계 초과 → 마지막 value. 임계/값은 다양한 GT 측정 후 정밀화 필요.
+        //
+        // [P67-B 5/24 21:30 측정 진단]
+        //   P67 [0.15,0.30,0.45]/[1.0,2.0,3.5,5.5]: raw 76% 가 3.5× 적용 → 긴 변 52%, 짧은 변 60%.
+        //   raw mean 0.333 이 0.30~0.45 구간에 집중 — 임계 더 낮춰서 *대부분 윈도우* 가
+        //   강한 scale 받게 함. + 빠른 보행 7.0× 로 saturation 한계 더 펴기.
+        //   임계 0.30 → 0.25 로 낮춰 mean raw 가 5.0× 받게 (이전 3.5× 대신).
         private val USE_ADAPTIVE_SCALE = true
-        private val ADAPTIVE_SCALE_THRESH = doubleArrayOf(0.15, 0.30, 0.45)
-        private val ADAPTIVE_SCALE_VALUES = doubleArrayOf(1.0,  2.0,  3.5,  5.5)
+        private val ADAPTIVE_SCALE_THRESH = doubleArrayOf(0.15, 0.25, 0.40)
+        private val ADAPTIVE_SCALE_VALUES = doubleArrayOf(1.0,  2.5,  5.0,  7.0)
 
         // ────────────────────────────────────────────────────────────
         // [P60] EKF 비교 모드 (단말 토글) — 모드별 EKF 계수 비교용
