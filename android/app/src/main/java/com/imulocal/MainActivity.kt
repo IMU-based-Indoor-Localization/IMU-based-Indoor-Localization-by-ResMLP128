@@ -1,6 +1,7 @@
 package com.imulocal
 
 import android.content.Intent
+import android.graphics.Color
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
@@ -11,6 +12,12 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import com.imulocal.databinding.ActivityMainBinding
+import com.naver.maps.map.CameraAnimation
+import com.naver.maps.map.CameraUpdate
+import com.naver.maps.map.MapFragment
+import com.naver.maps.map.NaverMap
+import com.naver.maps.map.OnMapReadyCallback
+import com.naver.maps.map.overlay.PolylineOverlay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
@@ -19,10 +26,16 @@ import kotlinx.coroutines.launch
  * ===============
  * 측위 시작/정지, 실시간 경로 표시, 상태 정보 표시.
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var viewModel: LocalizationViewModel
+
+    // [P68-4] Naver Map + PATH_B 궤적 polyline (파랑)
+    private var naverMap: NaverMap? = null
+    private val pathPolyline = PolylineOverlay()
+    private var lastPathSize: Int = 0
+    private var cameraMoved: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -32,12 +45,26 @@ class MainActivity : AppCompatActivity() {
 
         viewModel = ViewModelProvider(this)[LocalizationViewModel::class.java]
 
+        // [P68-4] MapFragment 획득 → onMapReady 콜백 등록
+        val mf = supportFragmentManager.findFragmentById(R.id.map) as MapFragment?
+            ?: MapFragment.newInstance().also {
+                supportFragmentManager.beginTransaction().add(R.id.map, it).commit()
+            }
+        mf.getMapAsync(this)
+
+        // [P68-4] polyline 초기 스타일 (실제 map 연결은 onMapReady 에서)
+        pathPolyline.color = Color.parseColor("#1565C0")  // 파랑
+        pathPolyline.width = 10
+
         // ── 버튼 이벤트 ─────────────────────────────────────────
         binding.btnStart.setOnClickListener { requestAndStart() }
         binding.btnStop.setOnClickListener  { viewModel.stop()  }
         binding.btnReset.setOnClickListener {
             viewModel.reset()
-            binding.trackView.clearPath()   // TrackView 내부 두 경로 모두 초기화
+            // [P68-4] polyline 도 초기화
+            pathPolyline.map = null
+            naverMap?.let { pathPolyline.map = it }
+            lastPathSize = 0
         }
         // [P45-Replay] Replay 버튼 — 단말의 imu_csv/replay/latest.csv 를 재생
         binding.btnReplay.setOnClickListener { startReplay() }
@@ -86,8 +113,37 @@ class MainActivity : AppCompatActivity() {
                     binding.calibCard.visibility = View.GONE
                 }
 
-                // [P57] 경로 B 단일 궤적 — modelTrackPoints 미사용(범례 단일화).
-                binding.trackView.updatePaths(s.trackPoints, emptyList())
+                // [P68-4] PATH_B 궤적을 Naver Map polyline 으로 표시.
+                //   size 변화 시에만 coords 재할당 — GL 불필요 업데이트 방지.
+                if (s.pathLatLng.size >= 2 && s.pathLatLng.size != lastPathSize) {
+                    naverMap?.let {
+                        pathPolyline.map    = it
+                        pathPolyline.coords = s.pathLatLng
+                    }
+                    lastPathSize = s.pathLatLng.size
+                }
+            }
+        }
+    }
+
+    // [P68-4] Naver Map 준비 콜백
+    override fun onMapReady(map: NaverMap) {
+        naverMap = map
+        // 백석역 으로 카메라 자동 이동 + 줌 18 (역 근접 보기)
+        if (!cameraMoved) {
+            map.moveCamera(
+                CameraUpdate.scrollTo(LocalizationViewModel.DEFAULT_ANCHOR)
+                    .animate(CameraAnimation.Easing, 500)
+            )
+            map.moveCamera(CameraUpdate.zoomTo(18.0))
+            cameraMoved = true
+        }
+        // 이미 누적된 path 가 있으면 즉시 표시
+        pathPolyline.map = map
+        viewModel.state.value.pathLatLng.let { pts ->
+            if (pts.size >= 2) {
+                pathPolyline.coords = pts
+                lastPathSize = pts.size
             }
         }
     }

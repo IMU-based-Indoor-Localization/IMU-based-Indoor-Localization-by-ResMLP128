@@ -1,198 +1,196 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.coordinatorlayout.widget.CoordinatorLayout
+<!--
+  [P68-4] Naver Map 전면 도입.
+  구조 (수직 LinearLayout):
+    1) Toolbar (메뉴 access — IMU 진단 / 경로 내보내기 / EKF 모드)
+    2) FrameLayout (전체 나머지):
+       - 전체 화면 Naver Map (com.naver.maps.map.MapFragment)
+       - 상단 overlay: calibCard (보정 중에만)
+       - 하단 overlay: infoCard (정보 + 버튼)
+  TrackView 는 제거 — 격자/거리 분석은 IMU 센서 진단 화면 또는 외부 도구.
+-->
+<LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#FAFAFA">
+    android:orientation="vertical">
 
-    <!-- 툴바 -->
-    <com.google.android.material.appbar.AppBarLayout
+    <!-- 툴바 (메뉴 access) -->
+    <androidx.appcompat.widget.Toolbar
+        android:id="@+id/toolbar"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content">
-        <androidx.appcompat.widget.Toolbar
-            android:id="@+id/toolbar"
+        android:layout_height="?attr/actionBarSize"
+        android:background="?attr/colorPrimary"
+        app:title="IMU 실내 측위"
+        app:titleTextColor="#FFFFFF"/>
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <!-- ── 전체 화면 Naver Map ──────────────────────────── -->
+        <fragment
+            android:id="@+id/map"
+            android:name="com.naver.maps.map.MapFragment"
             android:layout_width="match_parent"
-            android:layout_height="?attr/actionBarSize"
-            android:background="?attr/colorPrimary"
-            app:title="IMU 실내 측위"
-            app:titleTextColor="#FFFFFF"/>
-    </com.google.android.material.appbar.AppBarLayout>
+            android:layout_height="match_parent" />
 
-    <!-- 콘텐츠 -->
-    <androidx.core.widget.NestedScrollView
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        app:layout_behavior="@string/appbar_scrolling_view_behavior">
-
-        <LinearLayout
+        <!-- ── 상단 overlay: 캘리브 카드 ────────────────────── -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/calibCard"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="12dp">
+            android:layout_gravity="top"
+            android:layout_margin="12dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="#FFF8E1"
+            app:cardElevation="4dp"
+            app:cardCornerRadius="8dp">
 
-            <!-- 캘리브레이션 안내 카드 (영점 보정 중에만 표시) -->
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/calibCard"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="10dp"
-                android:visibility="gone"
-                app:cardBackgroundColor="#FFF8E1"
-                app:cardElevation="2dp"
-                app:cardCornerRadius="8dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="12dp">
-
-                    <TextView
-                        android:id="@+id/tvCalibTitle"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="센서 영점 보정 중"
-                        android:textSize="14sp"
-                        android:textStyle="bold"
-                        android:textColor="#E65100"/>
-
-                    <TextView
-                        android:id="@+id/tvCalibHint"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:text="캘리브레이션을 위해 2초간 기기를 가만히 두세요.\n측위는 폰을 진행 방향으로 들고 보행하는 HANDHELD 자세를 권장합니다."
-                        android:textSize="13sp"
-                        android:textColor="#5D4037"/>
-
-                    <ProgressBar
-                        android:id="@+id/calibProgress"
-                        style="?android:attr/progressBarStyleHorizontal"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:max="100"
-                        android:progress="0"/>
-
-                    <TextView
-                        android:id="@+id/tvCalibPercent"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:gravity="end"
-                        android:text="0 %"
-                        android:textSize="12sp"
-                        android:textColor="#9E6B00"
-                        android:fontFamily="monospace"/>
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- 경로 뷰 (P57: 경로 B 단일 궤적 — 파랑 측위 궤적 + 초록 시작점) -->
-            <com.imulocal.TrackView
-                android:id="@+id/trackView"
-                android:layout_width="match_parent"
-                android:layout_height="360dp"
-                android:background="#FFFFFF"
-                android:elevation="2dp"/>
-
-            <!-- 상태 정보 카드 -->
-            <com.google.android.material.card.MaterialCardView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                app:cardElevation="2dp"
-                app:cardCornerRadius="8dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:padding="12dp">
-
-                    <TextView android:id="@+id/tvPosition"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="[위치] x=0.000  y=0.000  z=0.000 m"
-                        android:textSize="14sp"
-                        android:textColor="#1565C0"
-                        android:fontFamily="monospace"/>
-
-                    <TextView android:id="@+id/tvStd"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="σ  x=0.0000  y=0.0000  z=0.0000 m"
-                        android:textSize="13sp"
-                        android:textColor="#757575"
-                        android:fontFamily="monospace"
-                        android:layout_marginTop="4dp"/>
-
-                    <TextView android:id="@+id/tvVelocity"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="속도  |v|=0.00 m/s"
-                        android:textSize="13sp"
-                        android:layout_marginTop="4dp"/>
-
-                    <!-- [P58] 휴대 방식(분류기 출력) 은 IMU 측정 진단 화면으로 이동.
-                         메뉴 → IMU 센서 진단 에서 측위 실행 중 확인 가능. -->
-
-                    <TextView android:id="@+id/tvLatency"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="추론 지연: 0 ms"
-                        android:textSize="12sp"
-                        android:textColor="#9E9E9E"
-                        android:layout_marginTop="4dp"/>
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <!-- 제어 버튼 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginTop="12dp"
-                android:gravity="center_horizontal">
+                android:orientation="vertical"
+                android:padding="12dp">
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnStart"
-                    android:layout_width="0dp"
+                <TextView
+                    android:id="@+id/tvCalibTitle"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="시작"
-                    android:layout_marginEnd="6dp"/>
+                    android:text="센서 영점 보정 중"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:textColor="#E65100"/>
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnStop"
-                    android:layout_width="0dp"
+                <TextView
+                    android:id="@+id/tvCalibHint"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="정지"
-                    android:enabled="false"
-                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    android:layout_marginEnd="6dp"/>
+                    android:layout_marginTop="4dp"
+                    android:text="캘리브레이션을 위해 2초간 기기를 가만히 두세요.\n측위는 폰을 진행 방향으로 들고 보행하는 HANDHELD 자세를 권장합니다."
+                    android:textSize="13sp"
+                    android:textColor="#5D4037"/>
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/btnReset"
-                    android:layout_width="0dp"
+                <ProgressBar
+                    android:id="@+id/calibProgress"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="초기화"
-                    style="@style/Widget.MaterialComponents.Button.TextButton"/>
+                    android:layout_marginTop="8dp"
+                    android:max="100"
+                    android:progress="0"/>
+
+                <TextView
+                    android:id="@+id/tvCalibPercent"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:gravity="end"
+                    android:text="0 %"
+                    android:textSize="12sp"
+                    android:textColor="#9E6B00"
+                    android:fontFamily="monospace"/>
             </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
-            <!-- [P45-Replay] CSV 재생 버튼 — 단말 imu_csv/replay/latest.csv 사용 -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnReplay"
+        <!-- ── 하단 overlay: 정보 + 버튼 ────────────────────── -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/infoCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:layout_margin="12dp"
+            app:cardBackgroundColor="#E8FFFFFF"
+            app:cardElevation="6dp"
+            app:cardCornerRadius="12dp">
+
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="Replay (latest.csv 재생)"
-                app:icon="@android:drawable/ic_media_play"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
+                android:orientation="vertical"
+                android:padding="12dp">
 
-        </LinearLayout>
-    </androidx.core.widget.NestedScrollView>
+                <TextView android:id="@+id/tvPosition"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="[위치] x=0.000  y=0.000  z=0.000 m"
+                    android:textSize="13sp"
+                    android:textColor="#1565C0"
+                    android:fontFamily="monospace"/>
 
-</androidx.coordinatorlayout.widget.CoordinatorLayout>
+                <TextView android:id="@+id/tvStd"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="σ  x=0.0000  y=0.0000  z=0.0000 m"
+                    android:textSize="12sp"
+                    android:textColor="#757575"
+                    android:fontFamily="monospace"
+                    android:layout_marginTop="2dp"/>
+
+                <TextView android:id="@+id/tvVelocity"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="속도  |v|=0.00 m/s"
+                    android:textSize="12sp"
+                    android:layout_marginTop="2dp"/>
+
+                <!-- [P58] 휴대 방식(분류기) 은 IMU 진단 화면에서 확인 -->
+
+                <TextView android:id="@+id/tvLatency"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="추론 지연: 0 ms"
+                    android:textSize="11sp"
+                    android:textColor="#9E9E9E"
+                    android:layout_marginTop="2dp"/>
+
+                <!-- 제어 버튼 -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="10dp"
+                    android:gravity="center_horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnStart"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="시작"
+                        android:layout_marginEnd="6dp"/>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnStop"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="정지"
+                        android:enabled="false"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:layout_marginEnd="6dp"/>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnReset"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="초기화"
+                        style="@style/Widget.MaterialComponents.Button.TextButton"/>
+                </LinearLayout>
+
+                <!-- [P45-Replay] CSV 재생 버튼 -->
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnReplay"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Replay (latest.csv 재생)"
+                    app:icon="@android:drawable/ic_media_play"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
+    </FrameLayout>
+</LinearLayout>
