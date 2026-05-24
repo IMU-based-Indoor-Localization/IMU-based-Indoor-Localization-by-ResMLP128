@@ -104,6 +104,13 @@ dependencies {
     // 코루틴
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 
+    // [P68-1] Naver Maps SDK + Google Play Services (GPS)
+    //   - map-sdk     : 지도 + Polyline overlay (PATH_B 궤적 표시)
+    //   - play-services-location : GpsTracker.kt (P68-2 신규) 가 사용. 실내 시연은 anchor 고정
+    //     이라 GPS 미사용. 옥외 시연 옵션은 추후 토글로 결정.
+    implementation 'com.naver.maps:map-sdk:3.23.2'
+    implementation 'com.google.android.gms:play-services-location:21.2.0'
+
     // 테스트
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'

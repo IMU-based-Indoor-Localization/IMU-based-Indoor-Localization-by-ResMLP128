@@ -10,6 +10,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // [P68-1] Naver Maps SDK (com.naver.maps:map-sdk)
+        maven { url 'https://repository.map.naver.com/archive/maven' }
     }
 }
 rootProject.name = "ImuLocalApp"

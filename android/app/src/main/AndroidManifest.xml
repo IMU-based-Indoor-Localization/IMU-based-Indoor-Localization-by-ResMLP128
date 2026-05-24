@@ -9,6 +9,14 @@
          normal permission — 런타임 요청 불필요, 선언만으로 적용됨 -->
     <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS"/>
 
+    <!-- [P68-1] Naver Maps 타일 로드 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- [P68-1] GPS 권한 — 실내 시연은 anchor 고정으로 GPS 미사용이나, 옥외 시연 호환을
+         위해 선언만 둠. GpsTracker.kt (P68-2) 가 활성화될 때만 실제 요청. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+
     <!-- 고정밀 IMU 센서 사용 선언 -->
     <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="true"/>
     <uses-feature android:name="android.hardware.sensor.gyroscope"     android:required="true"/>
@@ -20,6 +28,13 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.ImuLocal">
+
+        <!-- [P68-1] Naver Maps NCP Key ID (신 콘솔 console.ncloud.com/maps/application 발급)
+             ※ 옛 콘솔 키는 meta-data 이름이 CLIENT_ID, 신 콘솔은 NCP_KEY_ID. 둘 혼용 시
+                401 UnauthorizedClient. (map branch 와 동일 키 사용) -->
+        <meta-data
+            android:name="com.naver.maps.map.NCP_KEY_ID"
+            android:value="f7cl8uy1mq" />
 
         <activity
             android:name=".MainActivity"
