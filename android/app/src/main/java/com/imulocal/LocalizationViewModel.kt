@@ -368,7 +368,29 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //
         // 시연 가이드: 정상 보행 속도 (1.0~1.5 m/s) 권장. 빠른 보행 시 saturation.
         // 본질 해결은 단말 fine-tuning 트랙(docs/POSE_SWITCHING_PLAN.md Phase 4).
+        //
+        // [P67] HANDHELD_SPEED_SCALE 은 P64 비교용 fallback 으로만 유지.
+        // 실제 위치 계산은 아래 ADAPTIVE_SCALE_* 가 적용 (USE_ADAPTIVE_SCALE=true 기본).
         private const val HANDHELD_SPEED_SCALE = 2.0
+
+        // ────────────────────────────────────────────────────────────
+        // [P67] 임계 기반 적응 scale — saturation 비선형 보정의 simple form
+        //
+        // 배경: 모델 output 이 좁은 범위(~0.13~0.6 m/window)로 압축 (saturation).
+        //   단일 scale 로는 작은 변위 과대 + 큰 변위 과소 trade-off.
+        //   raw |disp_xy| 구간별로 다른 scale → 조각별 선형 보정.
+        //
+        // 구간 임계 근거 (5/24 측정):
+        //   정지/미세 떨림  : raw ~0.05~0.13 m  → 보정 1.0× (과대 방지)
+        //   느린 보행       : raw ~0.13~0.30 m  → 약한 보정 2.0×
+        //   정상 보행       : raw ~0.30~0.45 m  → 중간 보정 3.5×
+        //   빠른 보행       : raw ~0.45 m+     → 강한 보정 5.5× (saturation 천장)
+        //
+        // ADAPTIVE_SCALE_THRESH 의 i 번째 미만 → ADAPTIVE_SCALE_VALUES[i] 적용.
+        // 임계 초과 → 마지막 value. 임계/값은 다양한 GT 측정 후 정밀화 필요.
+        private val USE_ADAPTIVE_SCALE = true
+        private val ADAPTIVE_SCALE_THRESH = doubleArrayOf(0.15, 0.30, 0.45)
+        private val ADAPTIVE_SCALE_VALUES = doubleArrayOf(1.0,  2.0,  3.5,  5.5)
 
         // ────────────────────────────────────────────────────────────
         // [P60] EKF 비교 모드 (단말 토글) — 모드별 EKF 계수 비교용
@@ -1263,12 +1285,20 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // 모델 출력(≈1초 윈도우 변위) → 속도(m/s)
         val d0     = result.disp[0].toDouble()
         val d1     = result.disp[1].toDouble()
+        val rawXy  = sqrt(d0 * d0 + d1 * d1)  // raw |disp_xy| per window
         val winSec = WINDOW_DURATION_US / 1_000_000.0
-        var speed  = sqrt(d0 * d0 + d1 * d1) / winSec
 
-        // [P57] HANDHELD-only 단일 스케일 — 분류기 출력은 표시 전용(아래 carryMode).
-        // 모델의 Android 변위 ~30~40% 과소 → 균일 ~1.5× 보정.
-        speed *= HANDHELD_SPEED_SCALE
+        // [P67] 임계 기반 적응 scale — saturation 비선형 보정 simple form
+        //   rawXy 가 작으면(정지/떨림) 약하게, 크면(빠른 보행 saturation 천장)
+        //   강하게 곱한다. 단일 scale 의 작은변위 과대/큰변위 과소 동시 완화.
+        val scaleEff: Double = if (USE_ADAPTIVE_SCALE) {
+            var s = ADAPTIVE_SCALE_VALUES.last()
+            for (i in ADAPTIVE_SCALE_THRESH.indices) {
+                if (rawXy < ADAPTIVE_SCALE_THRESH[i]) { s = ADAPTIVE_SCALE_VALUES[i]; break }
+            }
+            s
+        } else HANDHELD_SPEED_SCALE
+        var speed = rawXy / winSec * scaleEff
 
         // 정지 윈도우 → 속도 0 (위치 고정, 단 UI 는 계속 갱신 = 안 멈춤)
         val dynamicFrac = computeDynamicFraction(window)
@@ -1309,7 +1339,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // 주기적 로그 (~1초마다)
         if (drTickCount++ % 20 == 0) {
             Log.i(TAG, "[DR] cls=${result.topClass}(${result.className}) " +
-                    "scale=${"%.2f".format(HANDHELD_SPEED_SCALE)} " +
+                    "raw=${"%.3f".format(rawXy)}m scale=${"%.2f".format(scaleEff)} " +
                     "speed=${"%.2f".format(sqrt(drVelX * drVelX + drVelY * drVelY))}m/s " +
                     "${if (isStatic) "STATIC " else ""}${if (isTurn) "TURN " else ""}" +
                     "netPos=[${"%.2f".format(netPosX)}, ${"%.2f".format(netPosY)}]")
