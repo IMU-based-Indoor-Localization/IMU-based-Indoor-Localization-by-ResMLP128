@@ -37,6 +37,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private var lastPathSize: Int = 0
     private var cameraMoved: Boolean = false
 
+    // [P68-5] 표시 모드 토글 (false=격자 TrackView 기본, true=Naver Map)
+    private var isMapMode: Boolean = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -61,7 +64,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         binding.btnStop.setOnClickListener  { viewModel.stop()  }
         binding.btnReset.setOnClickListener {
             viewModel.reset()
-            // [P68-4] polyline 도 초기화
+            // [P68-5] 두 view 모두 초기화 (어느 모드든 대응)
+            binding.trackView.clearPath()
             pathPolyline.map = null
             naverMap?.let { pathPolyline.map = it }
             lastPathSize = 0
@@ -113,8 +117,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                     binding.calibCard.visibility = View.GONE
                 }
 
-                // [P68-4] PATH_B 궤적을 Naver Map polyline 으로 표시.
-                //   size 변화 시에만 coords 재할당 — GL 불필요 업데이트 방지.
+                // [P68-5] 두 view 동시 갱신 — 토글 visibility 와 무관.
+                //   격자 TrackView (P66 1m 격자, 미터 좌표)
+                binding.trackView.updatePaths(s.trackPoints, emptyList())
+                //   지도 polyline (P68-3 LatLng 변환, size 변화 시만 GL 갱신)
                 if (s.pathLatLng.size >= 2 && s.pathLatLng.size != lastPathSize) {
                     naverMap?.let {
                         pathPolyline.map    = it
@@ -172,7 +178,29 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 showEkfModeDialog()
                 true
             }
+            R.id.action_toggle_view -> {
+                toggleView(item)
+                true
+            }
             else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    /**
+     * [P68-5] 격자 (TrackView) ↔ 지도 (MapFragment) 토글.
+     *  두 view 모두 같은 state 를 받으므로 visibility 만 전환.
+     *  메뉴 항목의 title 도 동기 갱신 — 다음 누름 동작을 안내.
+     */
+    private fun toggleView(menuItem: MenuItem) {
+        isMapMode = !isMapMode
+        if (isMapMode) {
+            binding.trackView.visibility = View.GONE
+            findViewById<View>(R.id.map)?.visibility = View.VISIBLE
+            menuItem.title = "표시 모드: 지도 → 격자"
+        } else {
+            binding.trackView.visibility = View.VISIBLE
+            findViewById<View>(R.id.map)?.visibility = View.GONE
+            menuItem.title = "표시 모드: 격자 → 지도"
         }
     }
 
