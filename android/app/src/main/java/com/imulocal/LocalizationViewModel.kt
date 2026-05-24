@@ -94,6 +94,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //   백석역 (3호선, 일산선) 좌표 — 사용자가 측정한 보행 데이터의 실측 지하철역.
         //   GPS 가 실내라 안 잡히므로 anchor 고정으로 PATH_B 궤적 overlay.
         //   학교 단면도 시연 시 좌표 교체 또는 GroundOverlay (P69+) 로 확장.
+        //
+        // [P68-6] DEFAULT_ANCHOR 는 *초기값* 으로만. 실제 사용 anchor 는 currentAnchor.
+        //   사용자가 지도 long-press 로 시작점 이동 시 setAnchor() 로 currentAnchor 갱신.
         val DEFAULT_ANCHOR: LatLng = LatLng(37.643016, 126.788051)
 
         /** PATH_B trackPoints 미터 변위 → LatLng. 좁은 시연 (~수십m) 단순 근사. */
@@ -486,6 +489,20 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     override fun onCleared() {
         if (sharedInstance === this) sharedInstance = null
         super.onCleared()
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // [P68-6] PATH_B 궤적을 LatLng 로 변환할 anchor (사용자가 지도 long-press 로 변경).
+    //   measure thread (propJob/inferJob) 와 main thread (long-press) 가 동시 접근 →
+    //   @Volatile.
+    @Volatile
+    var currentAnchor: LatLng = DEFAULT_ANCHOR
+        private set
+
+    /** [P68-6] 사용자 지도 long-press → 시작점 anchor 갱신. 측위 미실행 시에만 호출 권장. */
+    fun setAnchor(latLng: LatLng) {
+        currentAnchor = latLng
+        Log.i(TAG, "[P68-6] anchor 변경: lat=${latLng.latitude} lng=${latLng.longitude}")
     }
 
     // ?? ?섏〈 而댄룷?뚰듃 ????????????????????????????????????????????
@@ -1402,7 +1419,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 trackPoints.add(Pair(netPosX, netPosY))
                 if (trackPoints.size > 5000) trackPoints.removeAt(0)
                 // [P68-3] PATH_B trackPoints 와 1:1 동기로 LatLng 변환 누적 — Naver Map 입력용.
-                pathLatLngList.add(meterOffsetToLatLng(DEFAULT_ANCHOR, netPosX, netPosY))
+                // [P68-6] currentAnchor 사용 — long-press 변경 후 즉시 반영.
+                pathLatLngList.add(meterOffsetToLatLng(currentAnchor, netPosX, netPosY))
                 if (pathLatLngList.size > 5000) pathLatLngList.removeAt(0)
             }
         }

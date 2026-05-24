@@ -18,6 +18,7 @@ import com.naver.maps.map.CameraUpdate
 import com.naver.maps.map.MapFragment
 import com.naver.maps.map.NaverMap
 import com.naver.maps.map.OnMapReadyCallback
+import com.naver.maps.map.overlay.Marker
 import com.naver.maps.map.overlay.PolylineOverlay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -37,6 +38,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private val pathPolyline = PolylineOverlay()
     private var lastPathSize: Int = 0
     private var cameraMoved: Boolean = false
+
+    // [P68-6] 시작점 marker (빨간 핀) — long-press 로 위치 이동
+    private val startMarker = Marker().apply {
+        position = LocalizationViewModel.DEFAULT_ANCHOR
+        captionText = "시작점"
+        captionTextSize = 12f
+    }
 
     // [P68-5] 표시 모드 토글 (false=격자 TrackView 기본, true=Naver Map)
     private var isMapMode: Boolean = false
@@ -148,12 +156,30 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 lastPathSize = pts.size
             }
         }
+
+        // [P68-6] 시작점 마커 표시 + long-press 로 위치 이동
+        startMarker.position = viewModel.currentAnchor
+        startMarker.map = map
+        map.setOnMapLongClickListener { _, latLng ->
+            if (viewModel.state.value.isRunning) {
+                Toast.makeText(this,
+                    "측위 중에는 시작점 변경 불가 — [정지] 후 다시 시도",
+                    Toast.LENGTH_SHORT).show()
+            } else {
+                viewModel.setAnchor(latLng)
+                startMarker.position = latLng
+                map.cameraPosition = CameraPosition(latLng, map.cameraPosition.zoom)
+                Toast.makeText(this,
+                    "시작점 이동: %.6f, %.6f".format(latLng.latitude, latLng.longitude),
+                    Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
-    /** [P68-5 fix] 백석역 카메라 이동 — onMapReady + 지도 모드 전환 시 양쪽에서 호출. */
+    /** [P68-5 fix / P68-6] 현재 anchor 로 카메라 이동 — long-press 변경 후도 따라감. */
     private fun moveCameraToAnchor() {
         naverMap?.let { m ->
-            m.cameraPosition = CameraPosition(LocalizationViewModel.DEFAULT_ANCHOR, 18.0)
+            m.cameraPosition = CameraPosition(viewModel.currentAnchor, 18.0)
             cameraMoved = true
         }
     }
