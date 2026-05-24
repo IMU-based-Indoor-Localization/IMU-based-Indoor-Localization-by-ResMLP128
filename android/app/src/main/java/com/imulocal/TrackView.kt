@@ -8,6 +8,7 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.View
+import kotlin.math.ceil
 
 /**
  * TrackView.kt
@@ -25,6 +26,12 @@ class TrackView @JvmOverloads constructor(
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0
 ) : View(context, attrs, defStyleAttr) {
+
+    // ── [P66] 1m 고정 스케일 — 좁은 시연 (~5×5m) 직관 ↑ ───────────
+    companion object {
+        /** 1m = N 픽셀 (고정). 화면 가로 ~1080px → 표시 가능 영역 약 21m. */
+        const val PX_PER_M = 50f
+    }
 
     // ── 페인트 ────────────────────────────────────────────────────
     private val ekfPathPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -110,17 +117,18 @@ class TrackView @JvmOverloads constructor(
 
         val w   = width.toFloat()
         val h   = height.toFloat()
-        val pad = 48f
 
         canvas.drawColor(Color.WHITE)
-        drawGrid(canvas, w, h)
 
-        // 두 궤적 모두 점이 1개 미만이면 범례만 그리고 종료
+        // 두 궤적 모두 점이 1개 미만이면 격자만 그리고 종료
         val hasEkf   = ekfPoints.size   >= 2
         val hasModel = modelPoints.size >= 2
 
         if (!hasEkf && !hasModel) {
+            // [P66] 시작점도 없으면 화면 중앙 (0,0) 기준 격자만
+            drawGrid(canvas, w, h, w / 2f, h / 2f)
             drawLegend(canvas, w, h)
+            canvas.drawText("격자 ≈ 1.00 m/칸", 12f, h - 12f, gridInfoPaint)
             return
         }
 
@@ -132,22 +140,23 @@ class TrackView @JvmOverloads constructor(
 
         val minX = allXs.min(); val maxX = allXs.max()
         val minY = allYs.min(); val maxY = allYs.max()
+        val centerX = (minX + maxX) / 2.0
+        val centerY = (minY + maxY) / 2.0
 
-        // 최소 표시 범위: 실내 공간 기준 10m × 10m
-        // → 작은 오차가 화면 전체를 차지하는 과도한 확대 방지
-        // 궤적이 10m 초과 시 자동 축소
-        val MIN_RANGE_M = 10.0
-        val rangeX = (maxX - minX).coerceAtLeast(MIN_RANGE_M)
-        val rangeY = (maxY - minY).coerceAtLeast(MIN_RANGE_M)
-        val scaleX = (w - 2 * pad) / rangeX
-        val scaleY = (h - 2 * pad) / rangeY
-        val scale  = minOf(scaleX, scaleY)
+        // [P66] 1m = PX_PER_M 픽셀 고정 — 좁은 시연 (~5×5m) 직관 ↑.
+        //   bbox 중심을 화면 중앙으로 자동 panning. 큰 측정 시 화면 밖 짤림.
+        //   PX_PER_M 50 ≈ 화면 가로 19m, 세로 ~18m 표시 가능.
+        val scale = PX_PER_M.toDouble()
 
-        val offsetX = pad + ((w - 2 * pad) - rangeX * scale) / 2f
-        val offsetY = pad + ((h - 2 * pad) - rangeY * scale) / 2f
+        // 화면 중앙 = bbox 중심
+        val cx0 = w / 2f
+        val cy0 = h / 2f
 
-        fun toPixX(x: Double) = (offsetX + (x - minX) * scale).toFloat()
-        fun toPixY(y: Double) = (h - offsetY - (y - minY) * scale).toFloat()   // Y축 반전
+        fun toPixX(x: Double) = (cx0 + (x - centerX) * scale).toFloat()
+        fun toPixY(y: Double) = (cy0 - (y - centerY) * scale).toFloat()   // Y축 반전
+
+        // [P66] 격자도 1m 단위로 그림 — 시작점 위치 기준 정렬
+        drawGrid(canvas, w, h, toPixX(0.0), toPixY(0.0))
 
         // ── 모델 only 궤적 (먼저 그려 EKF 위에 덮이지 않게) ─────
         if (hasModel) {
@@ -194,11 +203,9 @@ class TrackView @JvmOverloads constructor(
         canvas.drawCircle(toPixX(startX), toPixY(startY), 11f, startPaint)
 
         drawLegend(canvas, w, h)
-        // [P65] 격자 1칸 m 표시 — drawGrid step=80px / scale = m/칸
-        //   자동 스케일링 결과를 직관적으로 알 수 있게 좌하단에 작게 표시.
-        val mPerGrid = 80.0 / scale
+        // [P66] 격자 1m 고정 — drawGrid step = PX_PER_M.
         canvas.drawText(
-            "격자 ≈ %.2f m/칸".format(mPerGrid),
+            "격자 = 1.00 m/칸",
             12f, h - 12f, gridInfoPaint
         )
     }
@@ -232,11 +239,40 @@ class TrackView @JvmOverloads constructor(
         }
     }
 
-    private fun drawGrid(canvas: Canvas, w: Float, h: Float) {
-        val step = 80f
-        var x = 0f
-        while (x <= w) { canvas.drawLine(x, 0f, x, h, gridPaint); x += step }
-        var y = 0f
-        while (y <= h) { canvas.drawLine(0f, y, w, y, gridPaint); y += step }
+    /**
+     * [P66] 1m 단위 격자 — step = PX_PER_M, 시작점(originPx) 기준 정렬.
+     * 5m 마다 굵은 선 + m 단위 라벨로 거리 직관 ↑.
+     */
+    private fun drawGrid(canvas: Canvas, w: Float, h: Float, originPxX: Float, originPxY: Float) {
+        val step = PX_PER_M
+        val gridBold = Paint(gridPaint).apply { color = Color.parseColor("#BDBDBD"); strokeWidth = 1.5f }
+        val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#9E9E9E"); textSize = 22f
+        }
+        // x 축 — 좌우로 격자 (origin 기준 −N, +N)
+        var i = -ceil((originPxX / step).toDouble()).toInt()
+        while (true) {
+            val x = originPxX + i * step
+            if (x > w) break
+            val bold = (i % 5 == 0)
+            canvas.drawLine(x, 0f, x, h, if (bold) gridBold else gridPaint)
+            if (bold && i != 0) {
+                canvas.drawText("${i}m", x + 2f, h - 30f, labelPaint)
+            }
+            i++
+        }
+        // y 축 — 상하로 격자
+        i = -ceil((originPxY / step).toDouble()).toInt()
+        while (true) {
+            val y = originPxY + i * step
+            if (y > h) break
+            val bold = (i % 5 == 0)
+            canvas.drawLine(0f, y, w, y, if (bold) gridBold else gridPaint)
+            if (bold && i != 0) {
+                // Y 는 화면 좌표(아래로 증가) → 실제 m 부호 반전
+                canvas.drawText("${-i}m", 4f, y - 4f, labelPaint)
+            }
+            i++
+        }
     }
 }
