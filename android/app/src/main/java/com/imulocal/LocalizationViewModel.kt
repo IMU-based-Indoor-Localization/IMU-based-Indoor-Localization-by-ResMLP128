@@ -390,13 +390,23 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // 임계 초과 → 마지막 value. 임계/값은 다양한 GT 측정 후 정밀화 필요.
         //
         // [P67-B 5/24 21:30 측정 진단]
-        //   P67 [0.15,0.30,0.45]/[1.0,2.0,3.5,5.5]: raw 76% 가 3.5× 적용 → 긴 변 52%, 짧은 변 60%.
-        //   raw mean 0.333 이 0.30~0.45 구간에 집중 — 임계 더 낮춰서 *대부분 윈도우* 가
-        //   강한 scale 받게 함. + 빠른 보행 7.0× 로 saturation 한계 더 펴기.
-        //   임계 0.30 → 0.25 로 낮춰 mean raw 가 5.0× 받게 (이전 3.5× 대신).
+        //   직사각형 25×12m: raw mean 0.333, max 0.591 → 5.0× hit 79% → 긴 변 84%, 짧은 변 96%.
+        //
+        // [P67-C 5/24 22:00 측정 진단 — 5m 왕복 시나리오에서 P67-B 발산]
+        //   5m 왕복: raw mean 0.541, max 1.081 → 7.0× hit 64% → path 41m (GT 10m 의 4×)
+        //   원인: 측정마다 raw 분포 다름. 단일 임계 테이블로 모든 시나리오 못 잡음 = 본질적
+        //         단일 scalar 한계의 재현. 직사각형 정답 임계가 5m 왕복엔 과대.
+        //
+        // P67-C 안전망 2개 (직사각형 효과 유지하면서 5m 왕복 발산 차단):
+        //   1) ADAPTIVE_RAW_OUTLIER: raw > 이 값 → scale 1.0× (saturation 위 비정상 값은
+        //      모델 신뢰도 낮음). 직사각형 max 0.591 은 영향 없음, 5m 왕복 max 1.081 차단.
+        //   2) MAX_EFFECTIVE_SPEED: 적용 후 speed 의 물리 상한. 사람 보행 max ~2 m/s.
+        //      어떤 임계/값 조합이든 보행 한계 위로 안 가게 강제.
         private val USE_ADAPTIVE_SCALE = true
         private val ADAPTIVE_SCALE_THRESH = doubleArrayOf(0.15, 0.25, 0.40)
         private val ADAPTIVE_SCALE_VALUES = doubleArrayOf(1.0,  2.5,  5.0,  7.0)
+        private const val ADAPTIVE_RAW_OUTLIER = 0.70   // raw > 이 값 → scale 1.0× (P67-C)
+        private const val MAX_EFFECTIVE_SPEED  = 2.0    // m/s — 보행 물리 상한 (P67-C)
 
         // ────────────────────────────────────────────────────────────
         // [P60] EKF 비교 모드 (단말 토글) — 모드별 EKF 계수 비교용
@@ -1297,14 +1307,20 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // [P67] 임계 기반 적응 scale — saturation 비선형 보정 simple form
         //   rawXy 가 작으면(정지/떨림) 약하게, 크면(빠른 보행 saturation 천장)
         //   강하게 곱한다. 단일 scale 의 작은변위 과대/큰변위 과소 동시 완화.
+        // [P67-C] raw outlier (raw > 0.7) 는 saturation 위 비정상 값 → 신뢰 안 함 (1.0×).
         val scaleEff: Double = if (USE_ADAPTIVE_SCALE) {
-            var s = ADAPTIVE_SCALE_VALUES.last()
-            for (i in ADAPTIVE_SCALE_THRESH.indices) {
-                if (rawXy < ADAPTIVE_SCALE_THRESH[i]) { s = ADAPTIVE_SCALE_VALUES[i]; break }
+            if (rawXy > ADAPTIVE_RAW_OUTLIER) 1.0
+            else {
+                var s = ADAPTIVE_SCALE_VALUES.last()
+                for (i in ADAPTIVE_SCALE_THRESH.indices) {
+                    if (rawXy < ADAPTIVE_SCALE_THRESH[i]) { s = ADAPTIVE_SCALE_VALUES[i]; break }
+                }
+                s
             }
-            s
         } else HANDHELD_SPEED_SCALE
         var speed = rawXy / winSec * scaleEff
+        // [P67-C] effective speed clamp — 사람 보행 물리 상한 2.0 m/s.
+        if (speed > MAX_EFFECTIVE_SPEED) speed = MAX_EFFECTIVE_SPEED
 
         // 정지 윈도우 → 속도 0 (위치 고정, 단 UI 는 계속 갱신 = 안 멈춤)
         val dynamicFrac = computeDynamicFraction(window)
