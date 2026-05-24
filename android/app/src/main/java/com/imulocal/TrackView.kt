@@ -74,6 +74,11 @@ class TrackView @JvmOverloads constructor(
         color    = Color.parseColor("#212121")
         textSize = 28f
     }
+    // [P65] 격자 1칸의 m 단위 표시 (자동 스케일링이라 가변)
+    private val gridInfoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color    = Color.parseColor("#616161")
+        textSize = 26f
+    }
 
     // ── 데이터 ────────────────────────────────────────────────────
     private var ekfPoints:   List<Pair<Double, Double>> = emptyList()
@@ -189,6 +194,13 @@ class TrackView @JvmOverloads constructor(
         canvas.drawCircle(toPixX(startX), toPixY(startY), 11f, startPaint)
 
         drawLegend(canvas, w, h)
+        // [P65] 격자 1칸 m 표시 — drawGrid step=80px / scale = m/칸
+        //   자동 스케일링 결과를 직관적으로 알 수 있게 좌하단에 작게 표시.
+        val mPerGrid = 80.0 / scale
+        canvas.drawText(
+            "격자 ≈ %.2f m/칸".format(mPerGrid),
+            12f, h - 12f, gridInfoPaint
+        )
     }
 
     // ── 범례 (우상단) ─────────────────────────────────────────────
