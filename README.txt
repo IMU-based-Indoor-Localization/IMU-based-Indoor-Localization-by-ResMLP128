@@ -223,14 +223,21 @@
        - 분류기도 Android 도메인에서는 OoD(주로 unknown) 라 결과를
          시각화 외에 기능적으로 신뢰하지 않는다.
 
-   (b) 모델 변위 *크기* 과소 (Android)
-       - OxIOD(iPhone) 학습 → Samsung Android 단말에서 보행 |disp|
-         ~30~40% 과소.
-       - 현재 HANDHELD_SPEED_SCALE = 1.5× 단일 상수로 평균 보정 (P57).
+   (b) 모델 변위 *크기* 과소 (Android) — **속도 비대칭 / saturation**
+       - OxIOD(iPhone) 학습 → Samsung Galaxy S23 FE 에서 보행 |disp|
+         과소. 현재 HANDHELD_SPEED_SCALE = 2.0× 단일 상수로 평균 보정 (P64).
+       - **단순 scalar 의 본질적 한계 (5/24 직사각형 25×12m GT 실측)**:
+           정상 보행 (~1.5 m/s 짧은 변 12 m): 98% 정확
+           빠른 보행 (~2.3 m/s 긴 변 25 m): 57% 과소
+           → 단일 scalar 로 양쪽 동시 못 맞춤 = 모델 saturation 현상
+             (학습 분포 OxIOD 1.0~1.5 m/s 의 over-range 보행에서 disp
+              압축됨)
+       - **시연 권장 속도: 1.0 ~ 1.5 m/s (정상 보행)**.
+           빠른 보행 (>1.8 m/s) 시 거리 과소 + 형태 비대칭.
        - per-class 차등 보정 필요 시: 휴대모드별 실측 데이터 확보 후
          P56 시점의 가중 스위칭 구조 복원(git history).
-       - walk1/walk2 의 *비대칭 과소* 는 전역 스케일로 못 고친다
-         (모델 per-window 편차).
+       - 본질 해결은 단말 자체 데이터 fine-tuning
+         (docs/POSE_SWITCHING_PLAN.md Phase 4).
 
    (c) 모델 변위 *방향* OoD (Android)
        - offline_eval.py GT 평가에서 모델 출력 방향이 Android 에선

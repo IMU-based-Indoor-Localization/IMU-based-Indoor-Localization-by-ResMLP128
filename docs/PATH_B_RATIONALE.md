@@ -141,12 +141,35 @@ P40 부터 P52 까지 단말 EKF 의 상수(`R_SCALE`, `meascov_scale`, `JUMP_GA
 - 분류기도 Android OoD (대부분 unknown) → 자세 자동 판별 신뢰 불가
 - ⇒ 데모 시연 자세를 HANDHELD only 로 명시(README §8.1)
 
-### 4.4 모델 *크기* 도 여전히 과소
-- Android 에서 모델 |disp| ~30~40% 과소 (Samsung 기기, latest.csv 진단)
+### 4.4 모델 *크기* 도 여전히 과소 — **속도 비대칭 / saturation (정량 확인)**
+
+- Android 에서 모델 |disp| 과소 (Samsung Galaxy S23 FE, latest.csv 초기 진단)
 - P56 시점에선 클래스별 가중치 시도 → 실측 데이터 부족으로 효과 무의미
 - P57 에서 균일 1.5× 단일 스칼라로 단순화 — *평균 보정* 만
-- walk1/walk2 *비대칭 과소* 는 전역 스케일로 못 고침 (모델 per-window 편차)
-- per-class 차등 보정은 휴대모드별 실측 데이터 확보 후 가능
+- P64 에서 직사각형 25×12 m GT 실측으로 **단일 scalar 한계 정량 확정**:
+
+  | 측정 (5/24 19:28, scale 2.5) | 결과 | GT | 비율 |
+  |---|---:|---:|---:|
+  | path (둘레) | 34.05 m | 74 m | **46%** |
+  | bbox 가로 (긴 변) | 14.2 m | 25 m | **57%** (빠른 보행, 과소) |
+  | bbox 세로 (짧은 변) | 11.8 m | 12 m | **98%** (정상 속도, 정확) |
+  | end_off (drift) | 4.25 m | 0 | 5.7% (74m 기준) |
+
+  **발견**: 긴 변(빠른 보행, ~2.3 m/s) 만 과소, 짧은 변(정상 속도, ~1.5 m/s) 정확.
+  → **단일 scalar 로 양쪽 동시 못 맞춤**. scale 만 키우면 짧은 변 과대.
+
+- **근본 원인 가설 — model output saturation**:
+  - 학습 분포 (OxIOD ~1.0~1.5 m/s) over-range 의 빠른 보행에서 모델 disp 가
+    *평균치로 압축* (saturation)
+  - 빠르게 걷든 천천히 걷든 모델 출력은 비슷한 범위 → cadence 의존, 거리 무감
+  - = OxIOD → Samsung Galaxy S23 FE 도메인 갭의 직접 증거
+
+- **walk1/walk2 비대칭 과소** 도 같은 saturation 의 다른 표현
+- P64 결정: scale **2.0** 로 절충 (긴 변 45% / 짧은 변 78%, 양쪽 일관 과소)
+- 시연 권장 속도: **1.0 ~ 1.5 m/s 정상 보행** (빠른 보행 시 saturation)
+- per-class 차등 보정도 본질 해소 못 함 (속도/방향 비대칭은 별개 layer)
+- **본질 해결은 단말 fine-tuning** (POSE_SWITCHING_PLAN.md Phase 4) — 본 발견이
+  fine-tuning 필요성의 정량 정당화
 
 ### 4.5 EKF 관측성/필터 이론적 우월성 포기
 - SC-EKF 의 yaw 관측성 회피(논문 §V-D) 사용 안 함

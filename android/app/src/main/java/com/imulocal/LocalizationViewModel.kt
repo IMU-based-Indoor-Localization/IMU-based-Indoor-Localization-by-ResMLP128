@@ -352,7 +352,23 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //
         // 향후 휴대모드별 실측 보정 데이터가 확보되면 그때 다시 가중 스위칭
         // 구조를 복원한다 (git history 의 P56 커밋 참조).
-        private const val HANDHELD_SPEED_SCALE = 1.5
+        // [P64] HANDHELD_SPEED_SCALE = 2.0 — 빠른/정상 보행 사이의 절충값
+        //
+        // 진단 (5/24 직사각형 25×12m GT 측정, scale 2.5):
+        //   path 34.05m / GT 74m = 46% (둘레 절반도 안 됨)
+        //   bbox 가로(긴 변): 14.2m / 25m = 57%  ← 빠른 보행, 과소
+        //   bbox 세로(짧은 변): 11.8m / 12m = 98% ← 정상 속도, 정확
+        //
+        // 즉 모델 saturation: 학습 분포(OxIOD ~1.0-1.5 m/s) over-range 의 빠른 보행
+        // (>1.8 m/s) 에서 모델 disp output 이 평균치로 압축됨. 단일 scalar 로는
+        // 빠른/정상 양쪽을 동시에 못 맞춤 → 절충값.
+        //   scale 2.5: 짧은 변 98% (정답) / 긴 변 57% (과소) — 비대칭
+        //   scale 2.0: 짧은 변 78% (약 과소) / 긴 변 45% (과소) — 균일 과소, 형태 일관
+        //   scale 1.5: 양쪽 더 과소
+        //
+        // 시연 가이드: 정상 보행 속도 (1.0~1.5 m/s) 권장. 빠른 보행 시 saturation.
+        // 본질 해결은 단말 fine-tuning 트랙(docs/POSE_SWITCHING_PLAN.md Phase 4).
+        private const val HANDHELD_SPEED_SCALE = 2.0
 
         // ────────────────────────────────────────────────────────────
         // [P60] EKF 비교 모드 (단말 토글) — 모드별 EKF 계수 비교용
