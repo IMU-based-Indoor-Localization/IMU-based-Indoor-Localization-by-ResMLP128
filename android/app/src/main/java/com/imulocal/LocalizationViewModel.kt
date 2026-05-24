@@ -21,6 +21,8 @@ import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.sin
 import kotlin.math.sqrt
+// [P68-3] Naver Maps LatLng — Map polyline 입력용
+import com.naver.maps.geometry.LatLng
 
 /**
  * LocalizationViewModel.kt
@@ -85,6 +87,21 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
     companion object {
         private const val TAG = "LocalizationVM"
+
+        // ────────────────────────────────────────────────────────────
+        // [P68-3] Naver Map 시연 — 실내 anchor 고정 (GPS 미사용)
+        //
+        //   백석역 (3호선, 일산선) 좌표 — 사용자가 측정한 보행 데이터의 실측 지하철역.
+        //   GPS 가 실내라 안 잡히므로 anchor 고정으로 PATH_B 궤적 overlay.
+        //   학교 단면도 시연 시 좌표 교체 또는 GroundOverlay (P69+) 로 확장.
+        val DEFAULT_ANCHOR: LatLng = LatLng(37.643016, 126.788051)
+
+        /** PATH_B trackPoints 미터 변위 → LatLng. 좁은 시연 (~수십m) 단순 근사. */
+        fun meterOffsetToLatLng(anchor: LatLng, dxM: Double, dyM: Double): LatLng {
+            val dLat = dyM / 111320.0
+            val dLng = dxM / (111320.0 * cos(Math.toRadians(anchor.latitude)))
+            return LatLng(anchor.latitude + dLat, anchor.longitude + dLng)
+        }
 
         /** 異붾줎 猷⑦봽 紐⑺몴 二쇨린: 20Hz */
         private const val INFER_INTERVAL_MS  = 50L
@@ -488,7 +505,10 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         val inferLatency:      Long    = 0L,
         // [P21-ish] 罹섎━釉뚮젅?댁뀡 UI ?쇰뱶諛???MainActivity ??calibCard ?쒖떆 ?쒖뼱
         val calibrating:       Boolean = false,
-        val calibProgress:     Float   = 0f
+        val calibProgress:     Float   = 0f,
+        // [P68-3] PATH_B trackPoints 를 백석역 anchor 기준 LatLng 로 변환한 시퀀스.
+        //   Naver Map Polyline.coords 에 직접 전달 가능. 빈 list = polyline 미표시.
+        val pathLatLng:        List<LatLng> = emptyList()
     )
 
     private val _state = MutableStateFlow(LocalizationState())
@@ -499,6 +519,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     private var propJob:  Job? = null
     private val trackPoints      = mutableListOf<Pair<Double, Double>>()
     private val modelTrackPoints = mutableListOf<Pair<Double, Double>>()
+    // [P68-3] PATH_B trackPoints 의 LatLng 변환 누적 (Naver Map polyline 입력).
+    //   trackPoints 와 1:1 동기로 추가됨. reset() 시 함께 클리어.
+    private val pathLatLngList   = mutableListOf<LatLng>()
 
     /** [P10] ?쒖옉 踰꾪듉???꾨Ⅸ ?쒓컖 (System.currentTimeMillis). ?뚮컢???먯젙???ъ슜. */
     private var startTimeMs: Long = 0L
@@ -757,6 +780,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         stop()
         trackPoints.clear()
         modelTrackPoints.clear()
+        pathLatLngList.clear()                       // [P68-3]
         modelPosX = 0.0
         modelPosY = 0.0
         // [P41 Dead-Reckoning Bypass] 위치 누적 초기화
@@ -1377,6 +1401,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             if (moved) {
                 trackPoints.add(Pair(netPosX, netPosY))
                 if (trackPoints.size > 5000) trackPoints.removeAt(0)
+                // [P68-3] PATH_B trackPoints 와 1:1 동기로 LatLng 변환 누적 — Naver Map 입력용.
+                pathLatLngList.add(meterOffsetToLatLng(DEFAULT_ANCHOR, netPosX, netPosY))
+                if (pathLatLngList.size > 5000) pathLatLngList.removeAt(0)
             }
         }
 
@@ -1389,7 +1416,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             carryProb         = result.clsProb.maxOrNull() ?: 0f,
             trackPoints       = trackPoints.toList(),
             modelTrackPoints  = emptyList(),
-            inferLatency      = inferLatency
+            inferLatency      = inferLatency,
+            pathLatLng        = pathLatLngList.toList()   // [P68-3]
         )
     }
 
