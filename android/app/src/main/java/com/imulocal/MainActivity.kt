@@ -46,6 +46,16 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         captionTextSize = 12f
     }
 
+    // [P68-7] GT 직사각형 25x12m 점선 polyline — 메뉴 토글로 on/off
+    //   anchor 기준 동쪽 25m + 북쪽 12m, 회색 점선. Replay 비교 시각화.
+    private val gtPolyline = PolylineOverlay().apply {
+        color = android.graphics.Color.parseColor("#888888")  // 회색
+        width = 6
+        // 점선 패턴 (Naver Maps SDK: setPattern(int...), [실선, 빈공간, ...])
+        setPattern(20, 10)
+    }
+    private var gtVisible: Boolean = false
+
     // [P68-5] 표시 모드 토글 (false=격자 TrackView 기본, true=Naver Map)
     private var isMapMode: Boolean = false
 
@@ -172,6 +182,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 Toast.makeText(this,
                     "시작점 이동: %.6f, %.6f".format(latLng.latitude, latLng.longitude),
                     Toast.LENGTH_SHORT).show()
+                // [P68-7] anchor 변경 시 GT 점선도 따라감
+                updateGtRect()
             }
         }
     }
@@ -212,8 +224,40 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 toggleView(item)
                 true
             }
+            R.id.action_toggle_gt -> {
+                toggleGt(item)
+                true
+            }
             else -> super.onOptionsItemSelected(item)
         }
+    }
+
+    /**
+     * [P68-7] GT 직사각형 25x12m 점선 표시/숨김 토글.
+     *   anchor 기준 동쪽 25m + 북쪽 12m. anchor 이동 시 자동 갱신.
+     */
+    private fun toggleGt(menuItem: MenuItem) {
+        gtVisible = !gtVisible
+        if (gtVisible) {
+            updateGtRect()
+            menuItem.title = "GT 점선 (25×12m) 숨김"
+        } else {
+            gtPolyline.map = null
+            menuItem.title = "GT 점선 (25×12m) 표시"
+        }
+    }
+
+    /** [P68-7] 현재 anchor 기준 25x12m 직사각형 좌표 계산 후 polyline 갱신. */
+    private fun updateGtRect() {
+        val map = naverMap ?: return
+        if (!gtVisible) return
+        val a = viewModel.currentAnchor
+        // 동쪽 25m / 북쪽 12m (anchor = SW 모서리, 4 모서리 시계방향 + 첫점 복귀)
+        val ne = LocalizationViewModel.meterOffsetToLatLng(a, 25.0, 12.0)
+        val se = LocalizationViewModel.meterOffsetToLatLng(a, 25.0, 0.0)
+        val nw = LocalizationViewModel.meterOffsetToLatLng(a, 0.0,  12.0)
+        gtPolyline.coords = listOf(a, se, ne, nw, a)
+        gtPolyline.map = map
     }
 
     /**
