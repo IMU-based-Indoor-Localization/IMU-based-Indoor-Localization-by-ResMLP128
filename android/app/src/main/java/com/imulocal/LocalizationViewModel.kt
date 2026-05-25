@@ -525,7 +525,10 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         val calibProgress:     Float   = 0f,
         // [P68-3] PATH_B trackPoints 를 백석역 anchor 기준 LatLng 로 변환한 시퀀스.
         //   Naver Map Polyline.coords 에 직접 전달 가능. 빈 list = polyline 미표시.
-        val pathLatLng:        List<LatLng> = emptyList()
+        val pathLatLng:        List<LatLng> = emptyList(),
+        // [P70] norm OFF 한 별도 추론 결과의 raw baseline (scale 1.0 누적).
+        //   메뉴 토글로 표시. PC ablation 의 단말 실측 비교용.
+        val pathLatLngRaw:     List<LatLng> = emptyList()
     )
 
     private val _state = MutableStateFlow(LocalizationState())
@@ -553,6 +556,11 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     private var netPosY = 0.0
     /** 직전 추론에서 EKF 모드였는지 — 모드 전환 시 _net_pos 재동기화용. */
     private var prevUsedEkfUpdate = true
+
+    // [P70] norm OFF 한 별도 추론 결과 누적 (raw baseline polyline 입력)
+    private val pathLatLngRawList = mutableListOf<LatLng>()
+    private var rawNetPosX = 0.0
+    private var rawNetPosY = 0.0
 
     /** [P55] RotVec DR: 마지막 적분 틱의 ts (μs). -1 = 미시작. dt 계산용. */
     private var lastDrTickTs: Long = -1L
@@ -798,6 +806,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         trackPoints.clear()
         modelTrackPoints.clear()
         pathLatLngList.clear()                       // [P68-3]
+        pathLatLngRawList.clear()                    // [P70]
+        rawNetPosX = 0.0; rawNetPosY = 0.0           // [P70]
         modelPosX = 0.0
         modelPosY = 0.0
         // [P41 Dead-Reckoning Bypass] 위치 누적 초기화
@@ -1399,6 +1409,25 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         modelPosX = netPosX
         modelPosY = netPosY
 
+        // [P70] *norm OFF 한 추론* 동시 수행 → raw baseline 누적.
+        //   같은 worldWindow 입력, applyNorm=false → 모델 입력에 mean/std 차감/나눔 안 함.
+        //   PC ablation 결과 (-norm: disp mean 0.36→0.99) 단말 실측 검증.
+        //   scale=1.0, clamp/outlier/static/turn/EMA 없음. heading 만 같이 사용.
+        if (USE_PDR_HEADING) {
+            try {
+                val rawResult = inferEngine.infer(worldWindow, applyNorm = false)
+                val rd0 = rawResult.disp[0].toDouble()
+                val rd1 = rawResult.disp[1].toDouble()
+                val rawXyN = sqrt(rd0 * rd0 + rd1 * rd1)
+                val hRaw = headingAt(ws - 1)
+                val rawSpeed = rawXyN / winSec   // scale=1.0
+                rawNetPosX += rawSpeed * cos(hRaw) * dt
+                rawNetPosY += rawSpeed * sin(hRaw) * dt
+            } catch (e: Exception) {
+                Log.w(TAG, "[P70] norm OFF 추론 예외: ${e.message}")
+            }
+        }
+
         // 주기적 로그 (~1초마다)
         if (drTickCount++ % 20 == 0) {
             Log.i(TAG, "[DR] cls=${result.topClass}(${result.className}) " +
@@ -1422,6 +1451,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 // [P68-6] currentAnchor 사용 — long-press 변경 후 즉시 반영.
                 pathLatLngList.add(meterOffsetToLatLng(currentAnchor, netPosX, netPosY))
                 if (pathLatLngList.size > 5000) pathLatLngList.removeAt(0)
+                // [P70] norm OFF baseline 도 동시 누적 (같은 시점에 추가 → polyline 비교 용이)
+                pathLatLngRawList.add(meterOffsetToLatLng(currentAnchor, rawNetPosX, rawNetPosY))
+                if (pathLatLngRawList.size > 5000) pathLatLngRawList.removeAt(0)
             }
         }
 
@@ -1435,7 +1467,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             trackPoints       = trackPoints.toList(),
             modelTrackPoints  = emptyList(),
             inferLatency      = inferLatency,
-            pathLatLng        = pathLatLngList.toList()   // [P68-3]
+            pathLatLng        = pathLatLngList.toList(),   // [P68-3]
+            pathLatLngRaw     = pathLatLngRawList.toList() // [P70]
         )
     }
 

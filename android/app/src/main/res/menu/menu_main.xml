@@ -19,6 +19,6 @@
         app:showAsAction="never"/>
     <item
         android:id="@+id/action_toggle_gt"
-        android:title="GT 점선 (25×12m) 표시"
+        android:title="norm 정규화 OFF baseline 표시"
         app:showAsAction="never"/>
 </menu>
