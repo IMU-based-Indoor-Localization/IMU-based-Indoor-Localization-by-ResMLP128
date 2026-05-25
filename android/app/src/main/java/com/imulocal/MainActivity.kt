@@ -46,15 +46,16 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         captionTextSize = 12f
     }
 
-    // [P68-7] GT 직사각형 25x12m 점선 polyline — 메뉴 토글로 on/off
-    //   anchor 기준 동쪽 25m + 북쪽 12m, 회색 점선. Replay 비교 시각화.
-    private val gtPolyline = PolylineOverlay().apply {
+    // [P68-8] 전처리 없는 baseline polyline (회색 점선) — P67-C 효과 격리 비교
+    //   같은 PATH_B 알고리즘에서 scale=1.0, clamp/outlier/static/turn/EMA 모두 끈 raw 누적.
+    //   메뉴 토글로 on/off. (이전 P68-7 의 GT 직사각형 점선은 제거.)
+    private val rawPolyline = PolylineOverlay().apply {
         color = android.graphics.Color.parseColor("#888888")  // 회색
         width = 6
-        // 점선 패턴 (Naver Maps SDK: setPattern(int...), [실선, 빈공간, ...])
-        setPattern(20, 10)
+        setPattern(20, 10)  // 점선
     }
-    private var gtVisible: Boolean = false
+    private var rawVisible: Boolean = false
+    private var lastRawSize: Int = 0
 
     // [P68-5] 표시 모드 토글 (false=격자 TrackView 기본, true=Naver Map)
     private var isMapMode: Boolean = false
@@ -88,6 +89,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             pathPolyline.map = null
             naverMap?.let { pathPolyline.map = it }
             lastPathSize = 0
+            // [P68-8] raw polyline 도 클리어 (visible 일 때 다시 표시 됨)
+            rawPolyline.map = null
+            if (rawVisible) naverMap?.let { rawPolyline.map = it }
+            lastRawSize = 0
         }
         // [P45-Replay] Replay 버튼 — 단말의 imu_csv/replay/latest.csv 를 재생
         binding.btnReplay.setOnClickListener { startReplay() }
@@ -147,6 +152,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                     }
                     lastPathSize = s.pathLatLng.size
                 }
+                // [P68-8] raw baseline polyline — visible 일 때만 갱신
+                if (rawVisible && s.pathLatLngRaw.size >= 2 && s.pathLatLngRaw.size != lastRawSize) {
+                    naverMap?.let {
+                        rawPolyline.map    = it
+                        rawPolyline.coords = s.pathLatLngRaw
+                    }
+                    lastRawSize = s.pathLatLngRaw.size
+                }
             }
         }
     }
@@ -182,8 +195,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 Toast.makeText(this,
                     "시작점 이동: %.6f, %.6f".format(latLng.latitude, latLng.longitude),
                     Toast.LENGTH_SHORT).show()
-                // [P68-7] anchor 변경 시 GT 점선도 따라감
-                updateGtRect()
             }
         }
     }
@@ -225,7 +236,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 true
             }
             R.id.action_toggle_gt -> {
-                toggleGt(item)
+                toggleRaw(item)
                 true
             }
             else -> super.onOptionsItemSelected(item)
@@ -233,31 +244,25 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     /**
-     * [P68-7] GT 직사각형 25x12m 점선 표시/숨김 토글.
-     *   anchor 기준 동쪽 25m + 북쪽 12m. anchor 이동 시 자동 갱신.
+     * [P68-8] 전처리 없는 raw baseline polyline 표시/숨김 토글.
+     *   같은 PATH_B 입력으로 scale=1.0, clamp/outlier/static/turn/EMA 모두 끈
+     *   누적을 회색 점선으로 표시 → P67-C 효과 격리 시각 비교.
      */
-    private fun toggleGt(menuItem: MenuItem) {
-        gtVisible = !gtVisible
-        if (gtVisible) {
-            updateGtRect()
-            menuItem.title = "GT 점선 (25×12m) 숨김"
+    private fun toggleRaw(menuItem: MenuItem) {
+        rawVisible = !rawVisible
+        val map = naverMap
+        if (rawVisible && map != null) {
+            val pts = viewModel.state.value.pathLatLngRaw
+            if (pts.size >= 2) {
+                rawPolyline.coords = pts
+                lastRawSize = pts.size
+            }
+            rawPolyline.map = map
+            menuItem.title = "전처리 없는 raw 점선 숨김"
         } else {
-            gtPolyline.map = null
-            menuItem.title = "GT 점선 (25×12m) 표시"
+            rawPolyline.map = null
+            menuItem.title = "전처리 없는 raw 점선 표시"
         }
-    }
-
-    /** [P68-7] 현재 anchor 기준 25x12m 직사각형 좌표 계산 후 polyline 갱신. */
-    private fun updateGtRect() {
-        val map = naverMap ?: return
-        if (!gtVisible) return
-        val a = viewModel.currentAnchor
-        // 동쪽 25m / 북쪽 12m (anchor = SW 모서리, 4 모서리 시계방향 + 첫점 복귀)
-        val ne = LocalizationViewModel.meterOffsetToLatLng(a, 25.0, 12.0)
-        val se = LocalizationViewModel.meterOffsetToLatLng(a, 25.0, 0.0)
-        val nw = LocalizationViewModel.meterOffsetToLatLng(a, 0.0,  12.0)
-        gtPolyline.coords = listOf(a, se, ne, nw, a)
-        gtPolyline.map = map
     }
 
     /**
