@@ -334,7 +334,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // [P73] 기존 EKF 모드 토글 — 런타임 변경 가능 (MainActivity 메뉴).
         //   true: PATH_B (RotVec DR) 와 *병렬* 로 EKF update 흐름 실행 + getPosition 누적.
         //   false: EKF measurement 흐름 skip — propagation 만 계속 (clone rotation 등 PATH_B 의존성 유지).
-        //   학술 시연 종료 후 P70 시리즈와 함께 제거 예정.
+        //   학술 시연 종료 후 제거 예정.
         @Volatile
         var enableEkfTrajectory: Boolean = false
 
@@ -516,12 +516,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // [P68-3] PATH_B trackPoints 를 백석역 anchor 기준 LatLng 로 변환한 시퀀스.
         //   Naver Map Polyline.coords 에 직접 전달 가능. 빈 list = polyline 미표시.
         val pathLatLng:        List<LatLng> = emptyList(),
-        // [P70] norm OFF 한 별도 추론 결과의 raw baseline (scale 1.0 누적).
-        //   메뉴 토글로 표시. PC ablation 의 단말 실측 비교용.
-        val pathLatLngRaw:     List<LatLng> = emptyList(),
         // [P73] 기존 EKF 모드의 궤적 (병렬 실행) — EkfBridge.getPosition 누적.
         //   메뉴 토글 활성화 시에만 EKF update 흐름이 PATH_B 와 *병렬* 로 진행.
-        //   학술 시연 종료 후 P70/P73 모두 제거 예정.
+        //   학술 시연 종료 후 제거 예정.
         val pathLatLngEkf:     List<LatLng> = emptyList()
     )
 
@@ -551,11 +548,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     /** 직전 추론에서 EKF 모드였는지 — 모드 전환 시 _net_pos 재동기화용. */
     private var prevUsedEkfUpdate = true
 
-    // [P70] norm OFF 한 별도 추론 결과 누적 (raw baseline polyline 입력)
-    private val pathLatLngRawList = mutableListOf<LatLng>()
-    private var rawNetPosX = 0.0
-    private var rawNetPosY = 0.0
-
     // [P73] EKF 궤적 (병렬) — EkfBridge.getPosition 을 50ms마다 읽어 누적
     private val pathLatLngEkfList = mutableListOf<LatLng>()
     private var ekfPosJob: Job? = null
@@ -567,9 +559,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     private var drVelY: Double = 0.0
     /** [P55] DR 틱 카운터 — 주기적 로그용. */
     private var drTickCount: Int = 0
-
-    /** [P70-5] 두 윈도우 비교 1회 로그 플래그 (전처리 OFF 검증용) */
-    private var p70VerifyDone: Boolean = false
 
     // ?? [?꾩씠?붿뼱 3] Hysteresis ?곹깭 癒몄떊 ????????????????????????????
     private enum class MotionState { STATIC, MOVING }
@@ -823,9 +812,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         trackPoints.clear()
         modelTrackPoints.clear()
         pathLatLngList.clear()                       // [P68-3]
-        pathLatLngRawList.clear()                    // [P70]
-        rawNetPosX = 0.0; rawNetPosY = 0.0           // [P70]
-        p70VerifyDone = false                        // [P70-5] 재시작마다 검증 로그 재출력
         pathLatLngEkfList.clear()                    // [P73]
         modelPosX = 0.0
         modelPosY = 0.0
@@ -1431,92 +1417,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         modelPosX = netPosX
         modelPosY = netPosY
 
-        // [P70-6] *전처리 일부 OFF + 모델 출력 방향 사용* → raw baseline 누적.
-        //   ─ 제거된 전처리 (학술 시연용) ─────────────────────────
-        //     (a) norm_mean/norm_std 정규화 (applyNorm=false)
-        //     (b) P21 영점 보정 (no-preprocess 버퍼는 bias 차감 미적용 raw)
-        //   ─ P70-6 에서 *복구된* 단계 ─────────────────────────
-        //     (c) 100Hz 리샘플 — 이전 P70-3..5 의 네이티브 ≈250Hz 입력은 모델이 100Hz
-        //         로 해석 → 윈도우당 400ms motion 만 담겨 norm OFF ×2.8 증폭이 시간
-        //         압축 ×0.4 와 상쇄돼 궤적이 오히려 작아짐. 100Hz 복구 → norm OFF
-        //         효과 그대로 발현 (PC ablation -norm 결과와 정합 기대).
-        //   ─ 제거된 후처리 (PATH_B vs raw 의 진짜 차이) ──────────
-        //     (d) RotVec heading PDR-hybrid → 모델 출력 방향 직접 사용
-        //         (PC ablation preproc_ablation.py 의 dead-reckoning 과 동일 로직.
-        //          이전 P70-3 까지는 heading=RotVec 공유로 "모양 같고 크기만 작음"
-        //          현상 → 전처리 효과 가시화 실패. P70-4 부터 방향까지 모델 신뢰.)
-        //     (e) adaptive scale / clamp / outlier / static / turn / EMA 모두 없음
-        //   ─ 유지된 단계 ──────────────────────────────────────
-        //     - gravity-aligned 좌표변환 (모델 입력 world frame 필수, 좌표계 ≠ 전처리)
-        //   적분: dw_world = R_z(yaw0) · model_disp,  rawPos += dw_world · dt/winSec
-        if (USE_PDR_HEADING) {
-            try {
-                val rawWindow  = imuCollector.getNoPreprocWindow()
-                val rawRotMats = imuCollector.getNoPreprocRotMatWindow()
-                if (rawWindow != null && rawRotMats != null) {
-                    // [P70-5] 일회성 검증 로그 — noPreproc vs PATH_B 입력 직접 비교
-                    if (!p70VerifyDone) {
-                        val (linAccBias, gyrBias) = imuCollector.getBiasSnapshot()
-                        Log.i(TAG, "[P70-5 검증] 두 윈도우 첫 3 샘플 비교 (전처리 OFF 확인)")
-                        Log.i(TAG, "  P21 bias: linAcc=${linAccBias.toList()}  gyr=${gyrBias.toList()}")
-                        for (t in 0 until 3.coerceAtMost(ws)) {
-                            val rawLinX = rawWindow[0 * ws + t]
-                            val rawGyrX = rawWindow[3 * ws + t]
-                            val pathLinX = window[0 * ws + t]   // PATH_B 의 raw window
-                            val pathGyrX = window[3 * ws + t]
-                            Log.i(TAG, "  t=$t  raw_lin.x=${"%.4f".format(rawLinX)}  " +
-                                    "path_lin.x=${"%.4f".format(pathLinX)}  " +
-                                    "diff=${"%.4f".format(rawLinX - pathLinX)}  " +
-                                    "(bias.x=${"%.4f".format(linAccBias[0])})")
-                            Log.i(TAG, "  t=$t  raw_gyr.x=${"%.5f".format(rawGyrX)}  " +
-                                    "path_gyr.x=${"%.5f".format(pathGyrX)}  " +
-                                    "diff=${"%.5f".format(rawGyrX - pathGyrX)}  " +
-                                    "(bias.x=${"%.5f".format(gyrBias[0])})")
-                        }
-                        Log.i(TAG, "  → raw - path == bias 이면 'no_calib' 정상 (bias 차감 안됨 확인)")
-                        Log.i(TAG, "  → raw 와 path 값 *다르면* 'no_window' 정상 (다른 시계열 = 다른 버퍼)")
-                        p70VerifyDone = true
-                    }
-
-                    // gravity-aligned 변환 (좌표변환만, 정규화/필터 없음)
-                    val rawWorldWindow = transformWindowRotVec(rawWindow, rawRotMats)
-                    val rawResult = inferEngine.infer(rawWorldWindow, applyNorm = false)
-                    val rd0 = rawResult.disp[0].toDouble()   // ga frame x
-                    val rd1 = rawResult.disp[1].toDouble()   // ga frame y
-                    val rawXyN = sqrt(rd0 * rd0 + rd1 * rd1)
-
-                    // [P70-6] 모델 출력 방향 사용 — yaw0 으로 world frame 복원
-                    //   transformWindowRotVec 가 yaw0 제거 (ga frame) → 출력도 ga frame.
-                    //   world 적분에는 +yaw0 회전 필요. rotMat[0..8] = window 시작 시점.
-                    val rawYaw0 = atan2(rawRotMats[3].toDouble(), rawRotMats[0].toDouble())
-                    val cosY0 = cos(rawYaw0)
-                    val sinY0 = sin(rawYaw0)
-                    val dwX = cosY0 * rd0 - sinY0 * rd1   // R_z(+yaw0) · [rd0, rd1]
-                    val dwY = sinY0 * rd0 + cosY0 * rd1
-                    // 적분: per-tick dt/winSec (overlap 윈도우 평균 효과)
-                    rawNetPosX += dwX * dt / winSec
-                    rawNetPosY += dwY * dt / winSec
-
-                    // [P70-6 진단] ~1초마다 raw 결과/방향/누적 위치 로그
-                    if (drTickCount % 20 == 0) {
-                        val hModel = atan2(dwY, dwX)
-                        val hRotVec = headingAt(ws - 1)
-                        Log.i(TAG, "[P70-6] raw disp=[${"%.3f".format(rd0)}, ${"%.3f".format(rd1)}] " +
-                                "|xy|=${"%.3f".format(rawXyN)}  " +
-                                "hModel=${"%.1f".format(Math.toDegrees(hModel))}° " +
-                                "hRotVec=${"%.1f".format(Math.toDegrees(hRotVec))}°  " +
-                                "rawPos=[${"%.2f".format(rawNetPosX)}, ${"%.2f".format(rawNetPosY)}]")
-                    }
-                } else {
-                    if (drTickCount % 100 == 0) {
-                        Log.w(TAG, "[P70-6] no-preprocess window 준비 안됨 (samples < $ws)")
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "[P70-6] no-preproc 추론 예외: ${e.javaClass.simpleName}: ${e.message}")
-            }
-        }
-
         // 주기적 로그 (~1초마다)
         if (drTickCount++ % 20 == 0) {
             Log.i(TAG, "[DR] cls=${result.topClass}(${result.className}) " +
@@ -1540,9 +1440,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 // [P68-6] currentAnchor 사용 — long-press 변경 후 즉시 반영.
                 pathLatLngList.add(meterOffsetToLatLng(currentAnchor, netPosX, netPosY))
                 if (pathLatLngList.size > 5000) pathLatLngList.removeAt(0)
-                // [P70] norm OFF baseline 도 동시 누적 (같은 시점에 추가 → polyline 비교 용이)
-                pathLatLngRawList.add(meterOffsetToLatLng(currentAnchor, rawNetPosX, rawNetPosY))
-                if (pathLatLngRawList.size > 5000) pathLatLngRawList.removeAt(0)
             }
         }
 
@@ -1556,9 +1453,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             trackPoints       = trackPoints.toList(),
             modelTrackPoints  = emptyList(),
             inferLatency      = inferLatency,
-            pathLatLng        = pathLatLngList.toList(),    // [P68-3]
-            pathLatLngRaw     = pathLatLngRawList.toList(), // [P70]
-            pathLatLngEkf     = pathLatLngEkfList.toList()  // [P73]
+            pathLatLng        = pathLatLngList.toList(),   // [P68-3]
+            pathLatLngEkf     = pathLatLngEkfList.toList() // [P73]
         )
     }
 

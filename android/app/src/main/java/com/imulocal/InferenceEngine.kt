@@ -140,7 +140,7 @@ class InferenceEngine(private val context: Context) {
      *                layout: [ch0_t0, ch0_t1, ..., ch5_t(N-1)]  (channel-major)
      * @return InferenceResult
      */
-    fun infer(window: FloatArray, applyNorm: Boolean = true): InferenceResult {
+    fun infer(window: FloatArray): InferenceResult {
         requireNotNull(module) { "모델이 로드되지 않았습니다. load() 를 먼저 호출하세요." }
         require(window.size == INPUT_CHANNEL * INPUT_LEN)
 
@@ -150,21 +150,13 @@ class InferenceEngine(private val context: Context) {
         // [P46-OOD] linAcc /= 9.81 (channel 0-2) + 정규화
         // OOD fix OFF 시: 기존 동작 (m/s² 그대로 정규화)
         // OOD fix ON  시: linAcc 를 g 단위로 변환 후 정규화 → OxIOD 학습 분포 매칭 시도
-        //
-        // [P70] applyNorm 토글 — false 시 (mean/std 차감/나눔) 건너뜀. 단위 변환만.
-        //   PC ablation 결과 norm 정규화가 모델 출력 압축(saturation)의 주된 원인 →
-        //   norm OFF 한 동시 추론으로 단말에서도 시각 비교 (raw baseline polyline).
         val normalized = FloatArray(srcWindow.size)
         for (ch in 0 until INPUT_CHANNEL) {
             // channel 0-2 (linAcc) 만 9.81 로 나눔. channel 3-5 (gyr) 는 그대로.
             val unitScale = if (USE_OOD_FIX && ch < 3) GRAVITY else 1f
             for (t in 0 until INPUT_LEN) {
                 val idx = ch * INPUT_LEN + t
-                normalized[idx] = if (applyNorm) {
-                    (srcWindow[idx] / unitScale - normMean[ch]) / normStd[ch]
-                } else {
-                    srcWindow[idx] / unitScale            // P70: norm 건너뜀
-                }
+                normalized[idx] = (srcWindow[idx] / unitScale - normMean[ch]) / normStd[ch]
             }
         }
 

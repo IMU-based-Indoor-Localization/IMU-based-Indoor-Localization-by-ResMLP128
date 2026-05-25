@@ -155,28 +155,6 @@ class ImuCollector(context: Context) : SensorEventListener {
     // ── 추론 윈도우용 링 버퍼 (최근 200 개 유지) ─────────────────
     private val ringBuffer = ArrayBlockingQueue<ImuSample>(BUFFER_SIZE)
 
-    // ── [P70-3] no-preprocess 버퍼 — 모든 전처리 BYPASS ──────────
-    //   - 100Hz 리샘플 X (네이티브 콜백마다 즉시 적재 ≈ 200-250Hz on Galaxy)
-    //   - P21 영점 보정 X (latestLinAcc/latestGyr 그대로 — bias 미차감)
-    //   - LPF X (linAccLpf/gyrLpf 자리에도 raw 동일 값 채움)
-    //   - 캘리브 기간 중에도 적재 (calibrating 분기 *앞*에서 push)
-    //   학술용: 전처리 작업의 효과를 시각적으로 보여주기 위해
-    //   getNoPreprocWindow() / getNoPreprocRotMatWindow() 로 별도 추론 경로 입력.
-    //   크기 BUFFER_SIZE*3 = 600 → 네이티브 250Hz 기준 약 2.4 초 보관 (윈도우 1초 충분).
-    private val noPreprocBuffer = ArrayBlockingQueue<ImuSample>(BUFFER_SIZE * 3)
-
-    // [P70-5] noPreprocBuffer push 비율 측정 (5초마다 로그) — 의도한 100Hz 확인용
-    @Volatile private var noPreprocPushCount: Long = 0
-    @Volatile private var noPreprocFirstTsUs: Long = -1L
-    @Volatile private var noPreprocLastLogTsUs: Long = -1L
-
-    // [P70-6] noPreprocBuffer 의 100Hz 리샘플 게이트 — ringBuffer 의 lastSampleTs 와 *분리*.
-    //   학술 시연: norm OFF + calib OFF + (100Hz 정상) 조합으로 norm 부재 효과를 정량 관찰.
-    //   이전 (P70-3..5) 의 네이티브 ≈250Hz 입력은 모델이 100Hz 로 해석 → 윈도우당 400ms
-    //   motion 만 담겨 norm OFF ×2.8 증폭이 시간압축 ×0.4 와 상쇄됐음. 본 변경으로 시간
-    //   압축 효과 제거 → norm OFF 효과가 그대로 가시화.
-    private var lastNoPreprocTs: Long = -1L
-
     // ── 최신 샘플 빠른 접근 ────────────────────────────────────
     @Volatile private var _latestSample: ImuSample? = null
 
@@ -264,11 +242,6 @@ class ImuCollector(context: Context) : SensorEventListener {
         rotVecAccuracy = 0  // 재시작 시 UNRELIABLE 로 초기화
         propagateQueue.clear()
         ringBuffer.clear()
-        noPreprocBuffer.clear()                 // [P70-3]
-        noPreprocPushCount = 0L                 // [P70-5]
-        noPreprocFirstTsUs = -1L                // [P70-5]
-        noPreprocLastLogTsUs = -1L              // [P70-5]
-        lastNoPreprocTs = -1L                   // [P70-6] 100Hz gate 리셋
         _latestSample = null
 
         // ── [P21-ish] 캘리브레이션 시작 상태 ──────────────────────
@@ -329,7 +302,6 @@ class ImuCollector(context: Context) : SensorEventListener {
             sensorManager.unregisterListener(this)
         }
         propagateQueue.clear()
-        noPreprocBuffer.clear()                 // [P70-3]
 
         // [P33-A1] LPF state 리셋
         resetLpfState()
@@ -403,55 +375,6 @@ class ImuCollector(context: Context) : SensorEventListener {
 
         // 가속도 + 자이로 모두 수신된 이후에만 샘플링
         if (latestAccTs < 0 || latestGyrTs < 0) return
-
-        // ── [P70-6] no-preprocess 버퍼 적재 — TYPE_ACC + 100Hz 게이트 ──
-        //   처음 P70-3 은 모든 sensorType 콜백마다 push (3× 중복 버그).
-        //   P70-5 에서 TYPE_ACCELEROMETER 만 통과시켜 ≈250Hz 네이티브 rate 확보.
-        //   P70-6 에서 *100Hz 리샘플만 복구* — norm/calib OFF 는 유지.
-        //     ⮡ 이전 시간압축 효과 (×0.4) 가 norm OFF 증폭 (×2.8) 을 상쇄해서
-        //        궤적이 오히려 작아지던 현상 제거 → norm OFF 효과만 정상 가시화.
-        //   linAcc/gyr 는 여전히 RAW (bias 미차감) 유지 — calib 효과 분리 관찰.
-        if (sensorType == Sensor.TYPE_ACCELEROMETER) {
-            // [P70-6] 100Hz 리샘플 — 마지막 push 로부터 10ms (sampleIntervalUs) 경과 시에만.
-            //   ringBuffer 의 lastSampleTs 와는 독립 변수 (gate 시점이 다름).
-            val shouldPush = if (lastNoPreprocTs < 0L) {
-                lastNoPreprocTs = tsUs
-                true
-            } else if (tsUs - lastNoPreprocTs >= sampleIntervalUs) {
-                lastNoPreprocTs = tsUs
-                true
-            } else {
-                false
-            }
-
-            if (shouldPush) {
-                val rawSample = ImuSample(
-                    ts_us      = tsUs,
-                    acc        = latestAcc.clone(),
-                    gyr        = latestGyr.clone(),       // RAW (bias 미차감)
-                    linAcc     = latestLinAcc.clone(),    // RAW (bias 미차감)
-                    linAccLpf  = latestLinAcc.clone(),    // LPF 자리에 raw 동일 값 (LPF 미적용)
-                    gyrLpf     = latestGyr.clone(),       // 동일
-                    rotMat     = latestRotMat
-                )
-                while (noPreprocBuffer.size >= BUFFER_SIZE * 3) noPreprocBuffer.poll()
-                noPreprocBuffer.offer(rawSample)
-
-                // [P70-5] push 비율 측정 — 5초마다 실제 Hz 로그 (P70-6 후 ≈100Hz 기대)
-                noPreprocPushCount++
-                if (noPreprocFirstTsUs < 0L) {
-                    noPreprocFirstTsUs = tsUs
-                    noPreprocLastLogTsUs = tsUs
-                } else if (tsUs - noPreprocLastLogTsUs > 5_000_000L) {  // 5 초
-                    val elapsedSec = (tsUs - noPreprocFirstTsUs) / 1_000_000.0
-                    val hz = noPreprocPushCount / elapsedSec
-                    Log.i(TAG, "[P70-6] noPreprocBuffer push rate = ${"%.1f".format(hz)} Hz " +
-                            "(count=$noPreprocPushCount, elapsed=${"%.1f".format(elapsedSec)}s, " +
-                            "buffer size=${noPreprocBuffer.size})  ← 100Hz 기대")
-                    noPreprocLastLogTsUs = tsUs
-                }
-            }
-        }
 
         // ── [P21-ish] 캘리브레이션 분기 ───────────────────────────
         // 시작 후 CALIBRATION_DURATION_MS 동안 linAcc + gyr 평균을 누적해
@@ -624,59 +547,6 @@ class ImuCollector(context: Context) : SensorEventListener {
             flat[5 * WINDOW_SIZE + t] = s.gyr[2]
         }
         return flat
-    }
-
-    /**
-     * [P70-3] no-preprocess 버퍼에서 최근 WINDOW_SIZE 샘플을 raw 6채널 window 로 반환.
-     *
-     * getRawWindow() 와의 차이:
-     *   - 100Hz 리샘플 *없음* — 네이티브 센서 콜백 그대로 (Galaxy 약 200-250Hz 추정).
-     *     → 모델 입력 분포가 학습 (100Hz) 와 어긋남 → 가시적 성능 저하 기대.
-     *   - P21 영점 보정 *없음* — bias 차감 미적용 → 정지 시 비영점 출력.
-     *   - LPF *없음* — 어차피 getRawWindow 도 LPF 미적용이지만, 본 함수는 ImuSample.linAcc
-     *     자체가 RAW (bias 미차감) 라는 차이.
-     *
-     * 채널: ch0-2 linAcc(raw), ch3-5 gyr(raw).  레이아웃: channel-major (학습 동일).
-     * @return FloatArray[6 × WINDOW_SIZE] or null (윈도우 미충족 시)
-     */
-    fun getNoPreprocWindow(): FloatArray? {
-        val snap = noPreprocBuffer.toArray().filterIsInstance<ImuSample>()
-        if (snap.size < WINDOW_SIZE) return null
-        val recent = snap.takeLast(WINDOW_SIZE)
-        val flat = FloatArray(CHANNEL_NUM * WINDOW_SIZE)
-        for ((t, s) in recent.withIndex()) {
-            flat[0 * WINDOW_SIZE + t] = s.linAcc[0]
-            flat[1 * WINDOW_SIZE + t] = s.linAcc[1]
-            flat[2 * WINDOW_SIZE + t] = s.linAcc[2]
-            flat[3 * WINDOW_SIZE + t] = s.gyr[0]
-            flat[4 * WINDOW_SIZE + t] = s.gyr[1]
-            flat[5 * WINDOW_SIZE + t] = s.gyr[2]
-        }
-        return flat
-    }
-
-    /**
-     * [P70-3] no-preprocess 버퍼의 동일 100 샘플에 대응하는 rotMat window 반환.
-     * gravity-aligned 변환에 사용 (모델은 world frame 입력을 기대 — 좌표변환 단계는 유지).
-     */
-    fun getNoPreprocRotMatWindow(): FloatArray? {
-        val snap = noPreprocBuffer.toArray().filterIsInstance<ImuSample>()
-        if (snap.size < WINDOW_SIZE) return null
-        val recent = snap.takeLast(WINDOW_SIZE)
-        val flat = FloatArray(9 * WINDOW_SIZE)
-        for ((t, s) in recent.withIndex()) {
-            System.arraycopy(s.rotMat, 0, flat, t * 9, 9)
-        }
-        return flat
-    }
-
-    /**
-     * [P70-3] no-preprocess 버퍼의 가장 최근 샘플 (timestamp 참조용).
-     */
-    fun getNoPreprocLatestSample(): ImuSample? = noPreprocBuffer.peek()?.let {
-        // ArrayBlockingQueue.peek 은 head (가장 오래된) 반환 — 가장 최근은 toArray().last
-        val snap = noPreprocBuffer.toArray().filterIsInstance<ImuSample>()
-        snap.lastOrNull()
     }
 
     /**

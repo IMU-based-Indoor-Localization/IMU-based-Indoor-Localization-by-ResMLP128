@@ -14,11 +14,7 @@
         android:title="표시 모드: 격자 → 지도"
         app:showAsAction="never"/>
     <item
-        android:id="@+id/action_toggle_gt"
-        android:title="전처리 OFF baseline 표시 (norm+calib)"
-        app:showAsAction="never"/>
-    <item
         android:id="@+id/action_toggle_ekf"
-        android:title="EKF 궤적 표시 (병렬 실행)"
+        android:title="전처리 OFF 궤적 표시"
         app:showAsAction="never"/>
 </menu>

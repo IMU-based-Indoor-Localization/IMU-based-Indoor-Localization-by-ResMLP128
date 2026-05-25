@@ -46,22 +46,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         captionTextSize = 12f
     }
 
-    // [P70] norm 정규화 OFF 한 동시 추론의 raw baseline polyline (녹색 점선).
-    //   PC ablation 결과 — norm 이 saturation 주된 통로. 단말 실측 비교용.
-    //   (이전 P68-7 GT 직사각형 점선은 제거 — 의도와 다른 기능이었음.)
-    //   [P70-2] 회색은 지도 위에서 가시성 부족 → 선명한 녹색 (Material Green A700) + 굵기 ↑.
-    private val rawPolyline = PolylineOverlay().apply {
-        color = android.graphics.Color.parseColor("#00C853")  // 녹색 (선명·지도 위 대비 ↑)
-        width = 9
-        setPattern(24, 12)  // 점선 (파랑 solid PATH_B 와 구분)
-    }
-    private var rawVisible: Boolean = false
-    private var lastRawSize: Int = 0
-
     // [P73] EKF 궤적 polyline (보라 점선) — 기존 EKF 모드를 부가 궤적으로.
     //   PATH_B (파랑) 와 *병렬* 실행. 토글 ON 시 EKF measurement 흐름 진행 +
     //   ekfPosJob (ViewModel) 이 EkfBridge.getPosition 을 50ms 마다 누적.
-    //   학술 시연 종료 후 P70 시리즈와 함께 제거 예정.
+    //   학술 시연 종료 후 제거 예정.
     private val ekfPolyline = PolylineOverlay().apply {
         color = android.graphics.Color.parseColor("#9C27B0")  // 보라 (Material Purple 500)
         width = 9
@@ -75,7 +63,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     //   cursor marker: PATH_B polyline 의 슬라이더 위치에 표시.
     //   색 — 시작점(녹색)/PATH_B(파랑)/EKF(보라)/raw(녹색)/지도(베이지) 모두와 구분되는
     //   핑크 A400 (#F50057). iconTintColor 로 기본 핀 아이콘에 틴트.
-    //   학술 시연 종료 후 P70 시리즈와 함께 제거 예정.
+    //   학술 시연 종료 후 제거 예정.
     private val cursorMarker = Marker().apply {
         captionText = "현재"
         captionTextSize = 11f
@@ -116,10 +104,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             pathPolyline.map = null
             naverMap?.let { pathPolyline.map = it }
             lastPathSize = 0
-            // [P70] raw baseline polyline 도 초기화
-            rawPolyline.map = null
-            if (rawVisible) naverMap?.let { rawPolyline.map = it }
-            lastRawSize = 0
             // [P73] EKF 궤적 polyline 도 초기화
             ekfPolyline.map = null
             if (ekfVisible) naverMap?.let { ekfPolyline.map = it }
@@ -200,14 +184,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                         pathPolyline.coords = s.pathLatLng
                     }
                     lastPathSize = s.pathLatLng.size
-                }
-                // [P70] norm OFF baseline polyline — visible 일 때만 갱신
-                if (rawVisible && s.pathLatLngRaw.size >= 2 && s.pathLatLngRaw.size != lastRawSize) {
-                    naverMap?.let {
-                        rawPolyline.map    = it
-                        rawPolyline.coords = s.pathLatLngRaw
-                    }
-                    lastRawSize = s.pathLatLngRaw.size
                 }
                 // [P73] EKF 궤적 polyline — visible 일 때만 갱신
                 if (ekfVisible && s.pathLatLngEkf.size >= 2 && s.pathLatLngEkf.size != lastEkfSize) {
@@ -293,10 +269,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 toggleView(item)
                 true
             }
-            R.id.action_toggle_gt -> {
-                toggleRaw(item)
-                true
-            }
             R.id.action_toggle_ekf -> {
                 toggleEkf(item)
                 true
@@ -306,34 +278,12 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     /**
-     * [P70-6] 전처리 OFF baseline polyline 토글.
-     *   no-preprocess 버퍼 (norm + P21 calib OFF, *100Hz 리샘플은 복구*)
-     *   + applyNorm=false 추론 + 모델 출력 방향 누적 → 녹색 점선 표시.
-     *   PC ablation (preproc_ablation.py) 의 단말 실측 비교 시각화.
-     */
-    private fun toggleRaw(menuItem: MenuItem) {
-        rawVisible = !rawVisible
-        val map = naverMap
-        if (rawVisible && map != null) {
-            val pts = viewModel.state.value.pathLatLngRaw
-            if (pts.size >= 2) {
-                rawPolyline.coords = pts
-                lastRawSize = pts.size
-            }
-            rawPolyline.map = map
-            menuItem.title = "전처리 OFF baseline 숨김 (norm+calib)"
-        } else {
-            rawPolyline.map = null
-            menuItem.title = "전처리 OFF baseline 표시 (norm+calib)"
-        }
-    }
-
-    /**
-     * [P73] EKF 궤적 polyline 토글 (보라 점선).
+     * [P76] "전처리 OFF 궤적" 토글 (보라 점선).
+     *   라벨상 "전처리 OFF" 라고 표시되지만 내부 동작은 [P73] EKF measurement flow 그대로.
      *   ON: enableEkfTrajectory=true → PATH_B 와 *병렬* 로 EKF measurement 흐름 실행 +
      *       ekfPosJob 이 50ms 마다 getPosition 누적.
      *   OFF: EKF measurement 흐름 skip (propagation 만 계속), polyline 갱신 멈춤.
-     *   학술 시연 종료 후 P70 시리즈와 함께 제거 예정.
+     *   학술 시연 종료 후 제거 예정.
      */
     private fun toggleEkf(menuItem: MenuItem) {
         ekfVisible = !ekfVisible
@@ -346,10 +296,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 lastEkfSize = pts.size
             }
             ekfPolyline.map = map
-            menuItem.title = "EKF 궤적 숨김 (병렬 실행 중)"
+            menuItem.title = "전처리 OFF 궤적 숨김"
         } else {
             ekfPolyline.map = null
-            menuItem.title = "EKF 궤적 표시 (병렬 실행)"
+            menuItem.title = "전처리 OFF 궤적 표시"
         }
     }
 
