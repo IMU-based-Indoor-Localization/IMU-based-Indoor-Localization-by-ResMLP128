@@ -77,13 +77,9 @@ import com.naver.maps.geometry.LatLng
  */
 class LocalizationViewModel(application: Application) : AndroidViewModel(application) {
 
-    /**
-     * [P60] EKF 비교 모드 — class 본문 nested enum.
-     *  PATH_B       : 데모 기본. RotVec DR + PDR-hybrid (EKF 미사용).
-     *  EKF_CURRENT  : 경로 A — 단말 현재 cfg (EkfBridge.DEFAULT_PARAMS).
-     *  EKF_TLIO     : 경로 A — TLIO 논문 §V-D/§V-E cfg (EkfBridge.TLIO_PARAMS).
-     */
-    enum class EkfMode { PATH_B, EKF_CURRENT, EKF_TLIO }
+    // [P71] EKF 비교 모드 (EkfMode enum + ekfMode var) 제거 — 항상 PATH_B 단일 경로.
+    //   PATH_B = RotVec DR + PDR-hybrid. EkfBridge 인프라는 PATH_B 내부에서 계속 사용
+    //   (clone rotation, freezeStaticState 등) — 제거 대상은 *비교용 모드 토글* 만.
 
     companion object {
         private const val TAG = "LocalizationVM"
@@ -335,6 +331,13 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // 토글 OFF: P53 순수 모델 DR (방향도 모델 disp 사용 — 랜덤워크화).
         private val USE_PDR_HEADING = true
 
+        // [P73] 기존 EKF 모드 토글 — 런타임 변경 가능 (MainActivity 메뉴).
+        //   true: PATH_B (RotVec DR) 와 *병렬* 로 EKF update 흐름 실행 + getPosition 누적.
+        //   false: EKF measurement 흐름 skip — propagation 만 계속 (clone rotation 등 PATH_B 의존성 유지).
+        //   학술 시연 종료 후 P70 시리즈와 함께 제거 예정.
+        @Volatile
+        var enableEkfTrajectory: Boolean = false
+
         // ────────────────────────────────────────────────────────────
         // [P55] 20Hz 속도 적분 — 추적 연속성 복원
         //
@@ -429,23 +432,10 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         private const val MAX_EFFECTIVE_SPEED  = 2.0    // m/s — 보행 물리 상한 (P67-C)
 
         // ────────────────────────────────────────────────────────────
-        // [P60] EKF 비교 모드 (단말 토글) — 모드별 EKF 계수 비교용
-        //
-        // 데모 기본은 PATH_B (RotVec DR + PDR-hybrid, EKF 미사용).
-        // 비교 측정 시에는 EKF_CURRENT / EKF_TLIO 중 하나로 전환해 *경로 A
-        // (논문 EKF)* 를 활성화하고, EkfBridge.create() 에 모드별 cfg 파라미터
-        // 를 전달한다. 식·gate(χ²=11.345, MAX_INNOV_NORM=3.0)는 두 모드 모두
-        // 동일하며, cfg 만 다르다(init_vel/init_ba/meascov_scale).
-        //
-        // 한 번 보행 → exportPath() 로 trackPoints CSV 저장 → 다른 모드로 다시
-        // 보행 → 두 CSV 를 tools/overlay_tracks.py 로 한 그래프에 겹쳐 비교.
-        // (enum 정의는 외부 Activity 가 `LocalizationViewModel.EkfMode` 로 직접
-        //  참조하도록 class 본문 nested 로 둠 — companion 안에 두면
-        //  `Companion.EkfMode` 거쳐야 해서 호출부가 복잡해진다.)
-
-        /** 런타임 변경 가능(MainActivity 메뉴). 기본 = 데모 경로 B. */
-        @Volatile
-        var ekfMode: EkfMode = EkfMode.PATH_B
+        // [P71] EKF 비교 모드 토글 제거 — 항상 PATH_B (RotVec DR + PDR-hybrid).
+        //   이전 P60 의 EKF_CURRENT/EKF_TLIO 모드 비교 기능은 학술 검증 종료
+        //   → 메뉴 제거 + enum/var 삭제. EkfBridge 인프라 (clone rotation,
+        //   freeze static state 등) 는 PATH_B 가 내부적으로 계속 사용하므로 보존.
 
         // ────────────────────────────────────────────────────────────
         // [P61] EKF measurement 를 PDR-hybrid 로 교체
@@ -528,7 +518,11 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         val pathLatLng:        List<LatLng> = emptyList(),
         // [P70] norm OFF 한 별도 추론 결과의 raw baseline (scale 1.0 누적).
         //   메뉴 토글로 표시. PC ablation 의 단말 실측 비교용.
-        val pathLatLngRaw:     List<LatLng> = emptyList()
+        val pathLatLngRaw:     List<LatLng> = emptyList(),
+        // [P73] 기존 EKF 모드의 궤적 (병렬 실행) — EkfBridge.getPosition 누적.
+        //   메뉴 토글 활성화 시에만 EKF update 흐름이 PATH_B 와 *병렬* 로 진행.
+        //   학술 시연 종료 후 P70/P73 모두 제거 예정.
+        val pathLatLngEkf:     List<LatLng> = emptyList()
     )
 
     private val _state = MutableStateFlow(LocalizationState())
@@ -562,6 +556,10 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     private var rawNetPosX = 0.0
     private var rawNetPosY = 0.0
 
+    // [P73] EKF 궤적 (병렬) — EkfBridge.getPosition 을 50ms마다 읽어 누적
+    private val pathLatLngEkfList = mutableListOf<LatLng>()
+    private var ekfPosJob: Job? = null
+
     /** [P55] RotVec DR: 마지막 적분 틱의 ts (μs). -1 = 미시작. dt 계산용. */
     private var lastDrTickTs: Long = -1L
     /** [P55] world-frame 속도 추정값 (m/s, EMA 평활). */
@@ -569,6 +567,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     private var drVelY: Double = 0.0
     /** [P55] DR 틱 카운터 — 주기적 로그용. */
     private var drTickCount: Int = 0
+
+    /** [P70-5] 두 윈도우 비교 1회 로그 플래그 (전처리 OFF 검증용) */
+    private var p70VerifyDone: Boolean = false
 
     // ?? [?꾩씠?붿뼱 3] Hysteresis ?곹깭 癒몄떊 ????????????????????????????
     private enum class MotionState { STATIC, MOVING }
@@ -688,16 +689,13 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             _state.value = _state.value.copy(calibrating = false, calibProgress = 1f)
 
             // [P60] EKF 생성 — ekfMode 별 cfg 파라미터 적용.
-            //   PATH_B / EKF_CURRENT : DEFAULT_PARAMS (단말 기본)
-            //   EKF_TLIO            : TLIO_PARAMS    (논문 §V-D/§V-E 계수)
+            //   (P60 stale)
+            //   (P60 stale)
 
             // EKF ?앹꽦 (罹섎━釉뚮젅?댁뀡 ?꾨즺 ??
-            val ekfCfgEnum = when (ekfMode) {
-                EkfMode.EKF_TLIO -> EkfBridge.EkfCfg.TLIO
-                else             -> EkfBridge.EkfCfg.CURRENT
-            }
-            Log.i(TAG, "[P60] EKF cfg = ${ekfMode.name} (${ekfCfgEnum.name})")
-            EkfBridge.create(EkfBridge.paramsFor(ekfCfgEnum))
+            // [P71] EKF cfg mode toggle removed — always CURRENT (PATH_B single path).
+            Log.i(TAG, "[P71] EKF cfg = CURRENT (PATH_B only)")
+            EkfBridge.create(EkfBridge.paramsFor(EkfBridge.EkfCfg.CURRENT))
 
             // ?? ??EKF ?꾪뙆 猷⑦봽 (5ms ?대쭅, 紐⑤뱺 100Hz ?섑뵆 泥섎━) ??
             propJob = viewModelScope.launch(Dispatchers.Default) {
@@ -783,6 +781,24 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 }
             }
 
+            // [P73] EKF 궤적 누적 job — 50ms 마다 EkfBridge.getPosition 읽어 누적.
+            //   enableEkfTrajectory=false 면 list 갱신 안 함 (polyline 정지).
+            //   inference loop 와 분리 → 측정 흐름 영향 없음.
+            ekfPosJob = viewModelScope.launch(Dispatchers.Default) {
+                while (isActive) {
+                    delay(50L)
+                    if (enableEkfTrajectory && EkfBridge.isInitialized()) {
+                        val pos = EkfBridge.getPosition()
+                        if (pos.size >= 2) {
+                            pathLatLngEkfList.add(meterOffsetToLatLng(
+                                currentAnchor, pos[0].toDouble(), pos[1].toDouble()
+                            ))
+                            if (pathLatLngEkfList.size > 5000) pathLatLngEkfList.removeAt(0)
+                        }
+                    }
+                }
+            }
+
             _state.value = _state.value.copy(isRunning = true)
         }
     }
@@ -791,6 +807,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     fun stop() {
         inferJob?.cancel(); inferJob = null
         propJob?.cancel();  propJob  = null
+        ekfPosJob?.cancel(); ekfPosJob = null    // [P73]
         imuCollector.stop()
         pendingCloneTs.set(-1L)
         lastInsertedCloneTs.set(-1L)
@@ -808,6 +825,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         pathLatLngList.clear()                       // [P68-3]
         pathLatLngRawList.clear()                    // [P70]
         rawNetPosX = 0.0; rawNetPosY = 0.0           // [P70]
+        p70VerifyDone = false                        // [P70-5] 재시작마다 검증 로그 재출력
+        pathLatLngEkfList.clear()                    // [P73]
         modelPosX = 0.0
         modelPosY = 0.0
         // [P41 Dead-Reckoning Bypass] 위치 누적 초기화
@@ -845,12 +864,15 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         if (!EkfBridge.isInitialized()) return
         if (!inferEngine.isLoaded())    return
 
-        // [P53] RotVec dead-reckoning 경로 — EKF 클론/update 흐름 완전 우회.
-        // [P60] ekfMode 가 EKF_CURRENT/EKF_TLIO 면 *EKF 경로* 강제 활성화.
-        //       PATH_B (기본, 데모) 일 때만 RotVec DR 로 우회.
-        if (USE_ROTVEC_DR && ekfMode == EkfMode.PATH_B) {
+        // [P53] RotVec dead-reckoning + PDR-hybrid — PATH_B 메인 측위.
+        // [P71] EKF cfg 비교 모드 제거 → 항상 PATH_B 단일 경로.
+        // [P73] PATH_B 는 항상 실행. enableEkfTrajectory 켜져 있으면 *병렬* 로
+        //       EKF measurement 흐름도 진행 (아래 코드 — 기존 P60 시기의 EKF flow).
+        //       EKF position 누적은 별도 ekfPosJob (start() 안) 에서 50ms마다 수행.
+        if (USE_ROTVEC_DR) {
             runRotVecDrStep()
-            return
+            if (!enableEkfTrajectory) return
+            // enableEkfTrajectory=true → 아래 EKF flow 계속 실행
         }
 
         // ??異붾줎 ?덈룄???뺣낫 (理쒖냼 100 ?섑뵆 ?꾩슂)
@@ -1409,22 +1431,89 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         modelPosX = netPosX
         modelPosY = netPosY
 
-        // [P70] *norm OFF 한 추론* 동시 수행 → raw baseline 누적.
-        //   같은 worldWindow 입력, applyNorm=false → 모델 입력에 mean/std 차감/나눔 안 함.
-        //   PC ablation 결과 (-norm: disp mean 0.36→0.99) 단말 실측 검증.
-        //   scale=1.0, clamp/outlier/static/turn/EMA 없음. heading 만 같이 사용.
+        // [P70-6] *전처리 일부 OFF + 모델 출력 방향 사용* → raw baseline 누적.
+        //   ─ 제거된 전처리 (학술 시연용) ─────────────────────────
+        //     (a) norm_mean/norm_std 정규화 (applyNorm=false)
+        //     (b) P21 영점 보정 (no-preprocess 버퍼는 bias 차감 미적용 raw)
+        //   ─ P70-6 에서 *복구된* 단계 ─────────────────────────
+        //     (c) 100Hz 리샘플 — 이전 P70-3..5 의 네이티브 ≈250Hz 입력은 모델이 100Hz
+        //         로 해석 → 윈도우당 400ms motion 만 담겨 norm OFF ×2.8 증폭이 시간
+        //         압축 ×0.4 와 상쇄돼 궤적이 오히려 작아짐. 100Hz 복구 → norm OFF
+        //         효과 그대로 발현 (PC ablation -norm 결과와 정합 기대).
+        //   ─ 제거된 후처리 (PATH_B vs raw 의 진짜 차이) ──────────
+        //     (d) RotVec heading PDR-hybrid → 모델 출력 방향 직접 사용
+        //         (PC ablation preproc_ablation.py 의 dead-reckoning 과 동일 로직.
+        //          이전 P70-3 까지는 heading=RotVec 공유로 "모양 같고 크기만 작음"
+        //          현상 → 전처리 효과 가시화 실패. P70-4 부터 방향까지 모델 신뢰.)
+        //     (e) adaptive scale / clamp / outlier / static / turn / EMA 모두 없음
+        //   ─ 유지된 단계 ──────────────────────────────────────
+        //     - gravity-aligned 좌표변환 (모델 입력 world frame 필수, 좌표계 ≠ 전처리)
+        //   적분: dw_world = R_z(yaw0) · model_disp,  rawPos += dw_world · dt/winSec
         if (USE_PDR_HEADING) {
             try {
-                val rawResult = inferEngine.infer(worldWindow, applyNorm = false)
-                val rd0 = rawResult.disp[0].toDouble()
-                val rd1 = rawResult.disp[1].toDouble()
-                val rawXyN = sqrt(rd0 * rd0 + rd1 * rd1)
-                val hRaw = headingAt(ws - 1)
-                val rawSpeed = rawXyN / winSec   // scale=1.0
-                rawNetPosX += rawSpeed * cos(hRaw) * dt
-                rawNetPosY += rawSpeed * sin(hRaw) * dt
+                val rawWindow  = imuCollector.getNoPreprocWindow()
+                val rawRotMats = imuCollector.getNoPreprocRotMatWindow()
+                if (rawWindow != null && rawRotMats != null) {
+                    // [P70-5] 일회성 검증 로그 — noPreproc vs PATH_B 입력 직접 비교
+                    if (!p70VerifyDone) {
+                        val (linAccBias, gyrBias) = imuCollector.getBiasSnapshot()
+                        Log.i(TAG, "[P70-5 검증] 두 윈도우 첫 3 샘플 비교 (전처리 OFF 확인)")
+                        Log.i(TAG, "  P21 bias: linAcc=${linAccBias.toList()}  gyr=${gyrBias.toList()}")
+                        for (t in 0 until 3.coerceAtMost(ws)) {
+                            val rawLinX = rawWindow[0 * ws + t]
+                            val rawGyrX = rawWindow[3 * ws + t]
+                            val pathLinX = window[0 * ws + t]   // PATH_B 의 raw window
+                            val pathGyrX = window[3 * ws + t]
+                            Log.i(TAG, "  t=$t  raw_lin.x=${"%.4f".format(rawLinX)}  " +
+                                    "path_lin.x=${"%.4f".format(pathLinX)}  " +
+                                    "diff=${"%.4f".format(rawLinX - pathLinX)}  " +
+                                    "(bias.x=${"%.4f".format(linAccBias[0])})")
+                            Log.i(TAG, "  t=$t  raw_gyr.x=${"%.5f".format(rawGyrX)}  " +
+                                    "path_gyr.x=${"%.5f".format(pathGyrX)}  " +
+                                    "diff=${"%.5f".format(rawGyrX - pathGyrX)}  " +
+                                    "(bias.x=${"%.5f".format(gyrBias[0])})")
+                        }
+                        Log.i(TAG, "  → raw - path == bias 이면 'no_calib' 정상 (bias 차감 안됨 확인)")
+                        Log.i(TAG, "  → raw 와 path 값 *다르면* 'no_window' 정상 (다른 시계열 = 다른 버퍼)")
+                        p70VerifyDone = true
+                    }
+
+                    // gravity-aligned 변환 (좌표변환만, 정규화/필터 없음)
+                    val rawWorldWindow = transformWindowRotVec(rawWindow, rawRotMats)
+                    val rawResult = inferEngine.infer(rawWorldWindow, applyNorm = false)
+                    val rd0 = rawResult.disp[0].toDouble()   // ga frame x
+                    val rd1 = rawResult.disp[1].toDouble()   // ga frame y
+                    val rawXyN = sqrt(rd0 * rd0 + rd1 * rd1)
+
+                    // [P70-6] 모델 출력 방향 사용 — yaw0 으로 world frame 복원
+                    //   transformWindowRotVec 가 yaw0 제거 (ga frame) → 출력도 ga frame.
+                    //   world 적분에는 +yaw0 회전 필요. rotMat[0..8] = window 시작 시점.
+                    val rawYaw0 = atan2(rawRotMats[3].toDouble(), rawRotMats[0].toDouble())
+                    val cosY0 = cos(rawYaw0)
+                    val sinY0 = sin(rawYaw0)
+                    val dwX = cosY0 * rd0 - sinY0 * rd1   // R_z(+yaw0) · [rd0, rd1]
+                    val dwY = sinY0 * rd0 + cosY0 * rd1
+                    // 적분: per-tick dt/winSec (overlap 윈도우 평균 효과)
+                    rawNetPosX += dwX * dt / winSec
+                    rawNetPosY += dwY * dt / winSec
+
+                    // [P70-6 진단] ~1초마다 raw 결과/방향/누적 위치 로그
+                    if (drTickCount % 20 == 0) {
+                        val hModel = atan2(dwY, dwX)
+                        val hRotVec = headingAt(ws - 1)
+                        Log.i(TAG, "[P70-6] raw disp=[${"%.3f".format(rd0)}, ${"%.3f".format(rd1)}] " +
+                                "|xy|=${"%.3f".format(rawXyN)}  " +
+                                "hModel=${"%.1f".format(Math.toDegrees(hModel))}° " +
+                                "hRotVec=${"%.1f".format(Math.toDegrees(hRotVec))}°  " +
+                                "rawPos=[${"%.2f".format(rawNetPosX)}, ${"%.2f".format(rawNetPosY)}]")
+                    }
+                } else {
+                    if (drTickCount % 100 == 0) {
+                        Log.w(TAG, "[P70-6] no-preprocess window 준비 안됨 (samples < $ws)")
+                    }
+                }
             } catch (e: Exception) {
-                Log.w(TAG, "[P70] norm OFF 추론 예외: ${e.message}")
+                Log.w(TAG, "[P70-6] no-preproc 추론 예외: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
 
@@ -1467,8 +1556,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             trackPoints       = trackPoints.toList(),
             modelTrackPoints  = emptyList(),
             inferLatency      = inferLatency,
-            pathLatLng        = pathLatLngList.toList(),   // [P68-3]
-            pathLatLngRaw     = pathLatLngRawList.toList() // [P70]
+            pathLatLng        = pathLatLngList.toList(),    // [P68-3]
+            pathLatLngRaw     = pathLatLngRawList.toList(), // [P70]
+            pathLatLngEkf     = pathLatLngEkfList.toList()  // [P73]
         )
     }
 

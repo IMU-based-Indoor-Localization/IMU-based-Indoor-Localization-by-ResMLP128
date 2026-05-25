@@ -6,8 +6,8 @@ import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.widget.SeekBar
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
@@ -46,16 +46,43 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         captionTextSize = 12f
     }
 
-    // [P70] norm 정규화 OFF 한 동시 추론의 raw baseline polyline (회색 점선).
+    // [P70] norm 정규화 OFF 한 동시 추론의 raw baseline polyline (녹색 점선).
     //   PC ablation 결과 — norm 이 saturation 주된 통로. 단말 실측 비교용.
     //   (이전 P68-7 GT 직사각형 점선은 제거 — 의도와 다른 기능이었음.)
+    //   [P70-2] 회색은 지도 위에서 가시성 부족 → 선명한 녹색 (Material Green A700) + 굵기 ↑.
     private val rawPolyline = PolylineOverlay().apply {
-        color = android.graphics.Color.parseColor("#888888")  // 회색
-        width = 6
-        setPattern(20, 10)  // 점선
+        color = android.graphics.Color.parseColor("#00C853")  // 녹색 (선명·지도 위 대비 ↑)
+        width = 9
+        setPattern(24, 12)  // 점선 (파랑 solid PATH_B 와 구분)
     }
     private var rawVisible: Boolean = false
     private var lastRawSize: Int = 0
+
+    // [P73] EKF 궤적 polyline (보라 점선) — 기존 EKF 모드를 부가 궤적으로.
+    //   PATH_B (파랑) 와 *병렬* 실행. 토글 ON 시 EKF measurement 흐름 진행 +
+    //   ekfPosJob (ViewModel) 이 EkfBridge.getPosition 을 50ms 마다 누적.
+    //   학술 시연 종료 후 P70 시리즈와 함께 제거 예정.
+    private val ekfPolyline = PolylineOverlay().apply {
+        color = android.graphics.Color.parseColor("#9C27B0")  // 보라 (Material Purple 500)
+        width = 9
+        setPattern(24, 12)
+    }
+    private var ekfVisible: Boolean = false
+    private var lastEkfSize: Int = 0
+
+    // [P74] 재생 슬라이더 + 현재 위치 마커.
+    //   sliderProgress: 0~100 (퍼센트). 100 = 라이브, 100 미만 = 사용자 scrub.
+    //   cursor marker: PATH_B polyline 의 슬라이더 위치에 표시.
+    //   색 — 시작점(녹색)/PATH_B(파랑)/EKF(보라)/raw(녹색)/지도(베이지) 모두와 구분되는
+    //   핑크 A400 (#F50057). iconTintColor 로 기본 핀 아이콘에 틴트.
+    //   학술 시연 종료 후 P70 시리즈와 함께 제거 예정.
+    private val cursorMarker = Marker().apply {
+        captionText = "현재"
+        captionTextSize = 11f
+        iconTintColor = android.graphics.Color.parseColor("#F50057")  // 핑크 A400
+    }
+    private var sliderProgress: Int = 100
+    private var sliderUserControlled: Boolean = false
 
     // [P68-5] 표시 모드 토글 (false=격자 TrackView 기본, true=Naver Map)
     private var isMapMode: Boolean = false
@@ -93,7 +120,29 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             rawPolyline.map = null
             if (rawVisible) naverMap?.let { rawPolyline.map = it }
             lastRawSize = 0
+            // [P73] EKF 궤적 polyline 도 초기화
+            ekfPolyline.map = null
+            if (ekfVisible) naverMap?.let { ekfPolyline.map = it }
+            lastEkfSize = 0
+            // [P74] cursor 마커 초기화 + 슬라이더 라이브 모드 복귀
+            cursorMarker.map = null
+            sliderUserControlled = false
+            sliderProgress = 100
+            binding.replaySeekBar.progress = 100
         }
+
+        // [P74] 슬라이더 리스너 — 사용자가 만지면 scrub 모드, 100% 도달하면 라이브 복귀
+        binding.replaySeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                sliderProgress = progress
+                sliderUserControlled = (progress < 100)
+                updateCursorMarker(viewModel.state.value.pathLatLng)
+                updateReplayTimeLabel(viewModel.state.value.pathLatLng)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
         // [P45-Replay] Replay 버튼 — 단말의 imu_csv/replay/latest.csv 를 재생
         binding.btnReplay.setOnClickListener { startReplay() }
 
@@ -159,6 +208,19 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                         rawPolyline.coords = s.pathLatLngRaw
                     }
                     lastRawSize = s.pathLatLngRaw.size
+                }
+                // [P73] EKF 궤적 polyline — visible 일 때만 갱신
+                if (ekfVisible && s.pathLatLngEkf.size >= 2 && s.pathLatLngEkf.size != lastEkfSize) {
+                    naverMap?.let {
+                        ekfPolyline.map    = it
+                        ekfPolyline.coords = s.pathLatLngEkf
+                    }
+                    lastEkfSize = s.pathLatLngEkf.size
+                }
+                // [P74] cursor 마커 + 시간 라벨 갱신 (지도 모드 + 데이터 존재 시)
+                if (isMapMode) {
+                    updateCursorMarker(s.pathLatLng)
+                    updateReplayTimeLabel(s.pathLatLng)
                 }
             }
         }
@@ -227,10 +289,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 exportPath()
                 true
             }
-            R.id.action_ekf_mode -> {
-                showEkfModeDialog()
-                true
-            }
             R.id.action_toggle_view -> {
                 toggleView(item)
                 true
@@ -239,13 +297,18 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 toggleRaw(item)
                 true
             }
+            R.id.action_toggle_ekf -> {
+                toggleEkf(item)
+                true
+            }
             else -> super.onOptionsItemSelected(item)
         }
     }
 
     /**
-     * [P70] norm 정규화 OFF baseline polyline 토글.
-     *   같은 입력 + applyNorm=false 한 별도 inference 누적 결과를 회색 점선으로 표시.
+     * [P70-6] 전처리 OFF baseline polyline 토글.
+     *   no-preprocess 버퍼 (norm + P21 calib OFF, *100Hz 리샘플은 복구*)
+     *   + applyNorm=false 추론 + 모델 출력 방향 누적 → 녹색 점선 표시.
      *   PC ablation (preproc_ablation.py) 의 단말 실측 비교 시각화.
      */
     private fun toggleRaw(menuItem: MenuItem) {
@@ -258,10 +321,35 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 lastRawSize = pts.size
             }
             rawPolyline.map = map
-            menuItem.title = "norm 정규화 OFF baseline 숨김"
+            menuItem.title = "전처리 OFF baseline 숨김 (norm+calib)"
         } else {
             rawPolyline.map = null
-            menuItem.title = "norm 정규화 OFF baseline 표시"
+            menuItem.title = "전처리 OFF baseline 표시 (norm+calib)"
+        }
+    }
+
+    /**
+     * [P73] EKF 궤적 polyline 토글 (보라 점선).
+     *   ON: enableEkfTrajectory=true → PATH_B 와 *병렬* 로 EKF measurement 흐름 실행 +
+     *       ekfPosJob 이 50ms 마다 getPosition 누적.
+     *   OFF: EKF measurement 흐름 skip (propagation 만 계속), polyline 갱신 멈춤.
+     *   학술 시연 종료 후 P70 시리즈와 함께 제거 예정.
+     */
+    private fun toggleEkf(menuItem: MenuItem) {
+        ekfVisible = !ekfVisible
+        LocalizationViewModel.enableEkfTrajectory = ekfVisible
+        val map = naverMap
+        if (ekfVisible && map != null) {
+            val pts = viewModel.state.value.pathLatLngEkf
+            if (pts.size >= 2) {
+                ekfPolyline.coords = pts
+                lastEkfSize = pts.size
+            }
+            ekfPolyline.map = map
+            menuItem.title = "EKF 궤적 숨김 (병렬 실행 중)"
+        } else {
+            ekfPolyline.map = null
+            menuItem.title = "EKF 궤적 표시 (병렬 실행)"
         }
     }
 
@@ -278,42 +366,63 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             binding.trackView.visibility = View.INVISIBLE
             findViewById<View>(R.id.map)?.visibility = View.VISIBLE
             menuItem.title = "표시 모드: 지도 → 격자"
+            // [P74] 슬라이더도 같이 보이게
+            binding.replayControls.visibility = View.VISIBLE
             // 지도 모드로 전환 시 카메라 강제 재이동 (안전망)
             moveCameraToAnchor()
+            // cursor 마커 즉시 갱신
+            updateCursorMarker(viewModel.state.value.pathLatLng)
+            updateReplayTimeLabel(viewModel.state.value.pathLatLng)
         } else {
             binding.trackView.visibility = View.VISIBLE
             findViewById<View>(R.id.map)?.visibility = View.INVISIBLE
             menuItem.title = "표시 모드: 격자 → 지도"
+            // [P74] 격자 모드에서는 슬라이더 숨김 (지도 마커도 자동으로 안 보임)
+            binding.replayControls.visibility = View.GONE
         }
     }
 
     /**
-     * [P60] EKF 모드 선택 다이얼로그.
-     *  PATH_B       : 데모 기본 (RotVec DR + PDR-hybrid, EKF 미사용).
-     *  EKF_CURRENT  : 경로 A — 단말 현재 cfg (DEFAULT_PARAMS).
-     *  EKF_TLIO     : 경로 A — TLIO 논문 §V-D/§V-E cfg (TLIO_PARAMS).
-     *
-     * 측위 실행 중 변경 시: 다음 [시작] 부터 새 모드 적용 (현재 세션 영향 없음).
+     * [P74] cursor 마커 갱신 — PATH_B polyline 의 슬라이더 위치에 표시.
+     *   sliderUserControlled=false 면 항상 polyline 끝 (라이브 추적).
+     *   true 면 sliderProgress (0~100) 비율로 인덱스 계산.
      */
-    private fun showEkfModeDialog() {
-        val modes  = LocalizationViewModel.EkfMode.values()
-        val labels = arrayOf(
-            "PATH_B (데모 기본, RotVec DR)",
-            "EKF_CURRENT (경로 A, 단말 cfg)",
-            "EKF_TLIO (경로 A, TLIO 논문 cfg)"
+    private fun updateCursorMarker(pathPts: List<com.naver.maps.geometry.LatLng>) {
+        val map = naverMap
+        if (map == null || pathPts.size < 2) {
+            cursorMarker.map = null
+            return
+        }
+        val idx = if (sliderUserControlled) {
+            ((sliderProgress / 100.0) * (pathPts.size - 1)).toInt().coerceIn(0, pathPts.size - 1)
+        } else {
+            pathPts.size - 1  // 라이브: 끝
+        }
+        cursorMarker.position = pathPts[idx]
+        if (cursorMarker.map == null) cursorMarker.map = map
+    }
+
+    /**
+     * [P74] 시간 라벨 갱신 — 슬라이더 위치를 가상의 시간 (인덱스 × ~50ms) 으로 표시.
+     *   total = polyline 길이 × inferInterval (≈50ms).
+     */
+    private fun updateReplayTimeLabel(pathPts: List<com.naver.maps.geometry.LatLng>) {
+        if (pathPts.size < 2) {
+            binding.tvReplayTime.text = "t = 0.00s / 0.00s   (대기)"
+            return
+        }
+        val totalSec = pathPts.size * 0.05  // ≈50ms per polyline 점 (inferInterval)
+        val curIdx = if (sliderUserControlled) {
+            ((sliderProgress / 100.0) * (pathPts.size - 1)).toInt().coerceIn(0, pathPts.size - 1)
+        } else {
+            pathPts.size - 1
+        }
+        val curSec = curIdx * 0.05
+        val mode = if (sliderUserControlled) "scrub" else "라이브"
+        binding.tvReplayTime.text = String.format(
+            "t = %.2fs / %.2fs   (%s)",
+            curSec, totalSec, mode
         )
-        val cur = LocalizationViewModel.ekfMode.ordinal
-        AlertDialog.Builder(this)
-            .setTitle("EKF 모드 (비교용)")
-            .setSingleChoiceItems(labels, cur) { dlg, which ->
-                LocalizationViewModel.ekfMode = modes[which]
-                Toast.makeText(this,
-                    "다음 [시작] 부터 적용: ${modes[which].name}",
-                    Toast.LENGTH_SHORT).show()
-                dlg.dismiss()
-            }
-            .setNegativeButton("닫기", null)
-            .show()
     }
 
     /**
@@ -348,17 +457,16 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             Toast.makeText(this, "경로 데이터가 없습니다.", Toast.LENGTH_SHORT).show()
             return
         }
-        // [P60] 헤더에 모드 메타 + 파일명에 mode 토큰 — 외부 비교 도구가 자동 인식.
-        val mode = LocalizationViewModel.ekfMode.name
+        // [P71] EKF 모드 비교 기능 제거 — 항상 PATH_B 단일 경로.
         val csv = buildString {
-            appendLine("# mode=$mode")
+            appendLine("# mode=PATH_B")
             appendLine("# n_points=${points.size}")
             appendLine("x_m,y_m")
             points.forEach { (x, y) -> appendLine("$x,$y") }
         }
         val file = java.io.File(
             getExternalFilesDir(null),
-            "track_${mode}_${System.currentTimeMillis()}.csv"
+            "track_PATH_B_${System.currentTimeMillis()}.csv"
         )
         file.writeText(csv)
         Toast.makeText(this, "경로 저장: ${file.name}", Toast.LENGTH_LONG).show()

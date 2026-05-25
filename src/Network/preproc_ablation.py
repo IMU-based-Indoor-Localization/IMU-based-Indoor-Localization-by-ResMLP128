@@ -172,22 +172,30 @@ def main():
                 and np.allclose(r["recon"], base_recon, atol=1e-6))
         eq_to_base.append(same)
 
+    # baseline 가시성 확보 — baseline 을 마지막에 그려서 위에 오게 + zorder 강제
+    plot_order = list(range(len(results)))
+    plot_order.sort(key=lambda i: results[i][0] == "baseline")   # baseline 마지막
+
     ax = axes[0]
-    for (label, r), c, ls, w, same in zip(results, colors, linestyles, widths, eq_to_base):
+    for i in plot_order:
+        (label, r), c, ls, w, same = results[i], colors[i], linestyles[i], widths[i], eq_to_base[i]
         suffix = " (= baseline)" if (same and label != "baseline") else ""
-        ax.plot(r["recon"][:, 0], r["recon"][:, 1], ls, lw=w, color=c, alpha=0.9,
+        z = 6 if label == "baseline" else 3
+        ax.plot(r["recon"][:, 0], r["recon"][:, 1], ls, lw=w, color=c, alpha=0.9, zorder=z,
                 label=f"{label}{suffix}  path={r['path']:.1f}m  end_off={r['end_off']:.2f}m")
-        ax.scatter([r['recon'][0,0]], [r['recon'][0,1]], color="#388E3C", s=80, zorder=5)
-        ax.scatter([r['recon'][-1,0]], [r['recon'][-1,1]], color=c, s=60, marker="x", zorder=5)
+        ax.scatter([r['recon'][0,0]], [r['recon'][0,1]], color="#388E3C", s=80, zorder=7)
+        ax.scatter([r['recon'][-1,0]], [r['recon'][-1,1]], color=c, s=60, marker="x", zorder=7)
     ax.set_title(f"전처리 ablation — dead-reckoning 궤적 ({Path(args.android).name})",
                  fontsize=14)
     ax.set_xlabel("x (m)", fontsize=12); ax.set_ylabel("y (m)", fontsize=12)
     ax.axis("equal"); ax.grid(alpha=0.3); ax.legend(fontsize=10, loc="best")
 
     ax2 = axes[1]
-    for (label, r), c, ls, w, same in zip(results, colors, linestyles, widths, eq_to_base):
+    for i in plot_order:
+        (label, r), c, ls, w, same = results[i], colors[i], linestyles[i], widths[i], eq_to_base[i]
         suffix = " (= baseline)" if (same and label != "baseline") else ""
-        ax2.plot(r["disp_xy"], ls, lw=w, color=c, alpha=0.9,
+        z = 6 if label == "baseline" else 3
+        ax2.plot(r["disp_xy"], ls, lw=w, color=c, alpha=0.9, zorder=z,
                  label=f"{label}{suffix}  mean={r['disp_mean']:.3f}m")
     ax2.axhline(1.5, color="r", ls=":", lw=1, label="정상 보행 상한 ~1.5m")
     ax2.set_title("window별 |disp_xy|", fontsize=14)

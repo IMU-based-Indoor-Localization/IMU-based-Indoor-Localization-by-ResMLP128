@@ -107,6 +107,37 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:visibility="invisible"/>
+
+        <!-- [P74] 재생 슬라이더 + 시간 라벨 (지도 모드일 때만 보임, 항상 하단).
+             scrub 모드: 0~100% 위치의 polyline 인덱스에 cursor marker 배치.
+             100% = 라이브 (자동 추적). 100% 미만 = 사용자 scrub. 학술 시연 종료 후 P70 시리즈와 함께 제거 예정. -->
+        <LinearLayout
+            android:id="@+id/replayControls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="vertical"
+            android:padding="8dp"
+            android:background="#CCFFFFFF"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tvReplayTime"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="t = 0.00s / 0.00s   (라이브)"
+                android:textSize="11sp"
+                android:textColor="#424242"
+                android:fontFamily="monospace"
+                android:gravity="end"/>
+
+            <SeekBar
+                android:id="@+id/replaySeekBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="100"
+                android:progress="100"/>
+        </LinearLayout>
     </FrameLayout>
 
     <!-- 정보 + 버튼 카드 (두 모드 공통, 항상 하단) -->
