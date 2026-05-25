@@ -525,10 +525,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         val calibProgress:     Float   = 0f,
         // [P68-3] PATH_B trackPoints 를 백석역 anchor 기준 LatLng 로 변환한 시퀀스.
         //   Naver Map Polyline.coords 에 직접 전달 가능. 빈 list = polyline 미표시.
-        val pathLatLng:        List<LatLng> = emptyList(),
-        // [P68-8] *전처리 없는* PATH_B baseline (scale=1, clamp/outlier/static/turn/EMA 없음).
-        //   P67-C 효과 격리 비교용. 메뉴 토글로 표시/숨김.
-        val pathLatLngRaw:     List<LatLng> = emptyList()
+        val pathLatLng:        List<LatLng> = emptyList()
     )
 
     private val _state = MutableStateFlow(LocalizationState())
@@ -542,11 +539,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     // [P68-3] PATH_B trackPoints 의 LatLng 변환 누적 (Naver Map polyline 입력).
     //   trackPoints 와 1:1 동기로 추가됨. reset() 시 함께 클리어.
     private val pathLatLngList   = mutableListOf<LatLng>()
-    // [P68-8] *전처리 없는* baseline 누적 — P67-C 효과 격리 비교용.
-    //   rotVec heading 은 같이 쓰지만 scale=1.0, clamp/outlier/static/turn/EMA 모두 없음.
-    private val pathLatLngRawList = mutableListOf<LatLng>()
-    private var rawNetPosX = 0.0
-    private var rawNetPosY = 0.0
 
     /** [P10] ?쒖옉 踰꾪듉???꾨Ⅸ ?쒓컖 (System.currentTimeMillis). ?뚮컢???먯젙???ъ슜. */
     private var startTimeMs: Long = 0L
@@ -806,8 +798,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         trackPoints.clear()
         modelTrackPoints.clear()
         pathLatLngList.clear()                       // [P68-3]
-        pathLatLngRawList.clear()                    // [P68-8]
-        rawNetPosX = 0.0; rawNetPosY = 0.0           // [P68-8]
         modelPosX = 0.0
         modelPosY = 0.0
         // [P41 Dead-Reckoning Bypass] 위치 누적 초기화
@@ -1409,15 +1399,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         modelPosX = netPosX
         modelPosY = netPosY
 
-        // [P68-8] *전처리 없는* baseline 동시 적분 (P67-C 효과 격리 비교용)
-        //   scale=1.0, clamp/outlier/static/turn/EMA 모두 없음. heading 만 같이 사용.
-        if (USE_PDR_HEADING) {
-            val hRaw = headingAt(ws - 1)
-            val rawSpeed = rawXy / winSec   // scale 보정/clamp/outlier 없음
-            rawNetPosX += rawSpeed * cos(hRaw) * dt
-            rawNetPosY += rawSpeed * sin(hRaw) * dt
-        }
-
         // 주기적 로그 (~1초마다)
         if (drTickCount++ % 20 == 0) {
             Log.i(TAG, "[DR] cls=${result.topClass}(${result.className}) " +
@@ -1441,9 +1422,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 // [P68-6] currentAnchor 사용 — long-press 변경 후 즉시 반영.
                 pathLatLngList.add(meterOffsetToLatLng(currentAnchor, netPosX, netPosY))
                 if (pathLatLngList.size > 5000) pathLatLngList.removeAt(0)
-                // [P68-8] 전처리 없는 raw 누적도 동시 추가 (같은 트리거)
-                pathLatLngRawList.add(meterOffsetToLatLng(currentAnchor, rawNetPosX, rawNetPosY))
-                if (pathLatLngRawList.size > 5000) pathLatLngRawList.removeAt(0)
             }
         }
 
@@ -1457,8 +1435,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             trackPoints       = trackPoints.toList(),
             modelTrackPoints  = emptyList(),
             inferLatency      = inferLatency,
-            pathLatLng        = pathLatLngList.toList(),   // [P68-3]
-            pathLatLngRaw     = pathLatLngRawList.toList() // [P68-8]
+            pathLatLng        = pathLatLngList.toList()   // [P68-3]
         )
     }
 
