@@ -87,13 +87,14 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // ────────────────────────────────────────────────────────────
         // [P68-3] Naver Map 시연 — 실내 anchor 고정 (GPS 미사용)
         //
-        //   백석역 (3호선, 일산선) 좌표 — 사용자가 측정한 보행 데이터의 실측 지하철역.
+        //   [P77] 국민대 미래관 좌표 (서울 성북구 정릉로 77 국민대학교 미래관) —
+        //   학내 시연 기본 anchor. 정확 위치는 단말 지도 long-press 로 미세 조정.
         //   GPS 가 실내라 안 잡히므로 anchor 고정으로 PATH_B 궤적 overlay.
-        //   학교 단면도 시연 시 좌표 교체 또는 GroundOverlay (P69+) 로 확장.
+        //   학교 단면도 시연 시 좌표 교체 또는 GroundOverlay 로 확장 가능.
         //
         // [P68-6] DEFAULT_ANCHOR 는 *초기값* 으로만. 실제 사용 anchor 는 currentAnchor.
         //   사용자가 지도 long-press 로 시작점 이동 시 setAnchor() 로 currentAnchor 갱신.
-        val DEFAULT_ANCHOR: LatLng = LatLng(37.643016, 126.788051)
+        val DEFAULT_ANCHOR: LatLng = LatLng(37.6109, 126.9963)
 
         /** PATH_B trackPoints 미터 변위 → LatLng. 좁은 시연 (~수십m) 단순 근사. */
         fun meterOffsetToLatLng(anchor: LatLng, dxM: Double, dyM: Double): LatLng {
@@ -513,7 +514,7 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // [P21-ish] 罹섎━釉뚮젅?댁뀡 UI ?쇰뱶諛???MainActivity ??calibCard ?쒖떆 ?쒖뼱
         val calibrating:       Boolean = false,
         val calibProgress:     Float   = 0f,
-        // [P68-3] PATH_B trackPoints 를 백석역 anchor 기준 LatLng 로 변환한 시퀀스.
+        // [P68-3] PATH_B trackPoints 를 현재 anchor 기준 LatLng 로 변환한 시퀀스.
         //   Naver Map Polyline.coords 에 직접 전달 가능. 빈 list = polyline 미표시.
         val pathLatLng:        List<LatLng> = emptyList(),
         // [P73] 기존 EKF 모드의 궤적 (병렬 실행) — EkfBridge.getPosition 누적.
@@ -548,9 +549,13 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     /** 직전 추론에서 EKF 모드였는지 — 모드 전환 시 _net_pos 재동기화용. */
     private var prevUsedEkfUpdate = true
 
-    // [P73] EKF 궤적 (병렬) — EkfBridge.getPosition 을 50ms마다 읽어 누적
+    // [P78] window-start ablation 궤적 (라벨상 "전처리 OFF") — PATH_B 와 동기 누적.
+    //   변수명 (ekfPosJob, pathLatLngEkf*) 은 P73 의 EKF 흐름 → P78 의 ablation 으로
+    //   의미만 재정의. ekfPosJob 은 더 이상 launch 안 됨 (start() 에서 제거).
     private val pathLatLngEkfList = mutableListOf<LatLng>()
-    private var ekfPosJob: Job? = null
+    private var ekfPosJob: Job? = null   // [P78] 미사용, signature 호환 위해 유지
+    private var preprocOffPosX: Double = 0.0   // [P78] window-start ablation 적분 누적
+    private var preprocOffPosY: Double = 0.0
 
     /** [P55] RotVec DR: 마지막 적분 틱의 ts (μs). -1 = 미시작. dt 계산용. */
     private var lastDrTickTs: Long = -1L
@@ -770,23 +775,10 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 }
             }
 
-            // [P73] EKF 궤적 누적 job — 50ms 마다 EkfBridge.getPosition 읽어 누적.
-            //   enableEkfTrajectory=false 면 list 갱신 안 함 (polyline 정지).
-            //   inference loop 와 분리 → 측정 흐름 영향 없음.
-            ekfPosJob = viewModelScope.launch(Dispatchers.Default) {
-                while (isActive) {
-                    delay(50L)
-                    if (enableEkfTrajectory && EkfBridge.isInitialized()) {
-                        val pos = EkfBridge.getPosition()
-                        if (pos.size >= 2) {
-                            pathLatLngEkfList.add(meterOffsetToLatLng(
-                                currentAnchor, pos[0].toDouble(), pos[1].toDouble()
-                            ))
-                            if (pathLatLngEkfList.size > 5000) pathLatLngEkfList.removeAt(0)
-                        }
-                    }
-                }
-            }
+            // [P78] EKF 흐름 (병렬 measurement update) 제거 — ekfPosJob 더 이상 launch 안 함.
+            //   pathLatLngEkfList 는 *window-start ablation* 결과 누적용으로 의미 재정의.
+            //   누적은 runRotVecDrStep 안에서 PATH_B 와 동기로 수행 (별도 job 불필요).
+            //   변수명 (ekfPosJob, pathLatLngEkf) 은 변경 폭 최소화를 위해 그대로 유지.
 
             _state.value = _state.value.copy(isRunning = true)
         }
@@ -796,7 +788,6 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
     fun stop() {
         inferJob?.cancel(); inferJob = null
         propJob?.cancel();  propJob  = null
-        ekfPosJob?.cancel(); ekfPosJob = null    // [P73]
         imuCollector.stop()
         pendingCloneTs.set(-1L)
         lastInsertedCloneTs.set(-1L)
@@ -812,7 +803,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         trackPoints.clear()
         modelTrackPoints.clear()
         pathLatLngList.clear()                       // [P68-3]
-        pathLatLngEkfList.clear()                    // [P73]
+        pathLatLngEkfList.clear()                    // [P78] window-start ablation list
+        preprocOffPosX = 0.0; preprocOffPosY = 0.0   // [P78]
         modelPosX = 0.0
         modelPosY = 0.0
         // [P41 Dead-Reckoning Bypass] 위치 누적 초기화
@@ -852,13 +844,11 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
 
         // [P53] RotVec dead-reckoning + PDR-hybrid — PATH_B 메인 측위.
         // [P71] EKF cfg 비교 모드 제거 → 항상 PATH_B 단일 경로.
-        // [P73] PATH_B 는 항상 실행. enableEkfTrajectory 켜져 있으면 *병렬* 로
-        //       EKF measurement 흐름도 진행 (아래 코드 — 기존 P60 시기의 EKF flow).
-        //       EKF position 누적은 별도 ekfPosJob (start() 안) 에서 50ms마다 수행.
+        // [P78] EKF measurement flow 분기 제거 — window-start ablation 은 runRotVecDrStep
+        //       내부에서 PATH_B 와 동기 실행. 아래 dead code (P60 시기 EKF flow) 는 미실행.
         if (USE_ROTVEC_DR) {
             runRotVecDrStep()
-            if (!enableEkfTrajectory) return
-            // enableEkfTrajectory=true → 아래 EKF flow 계속 실행
+            return
         }
 
         // ??異붾줎 ?덈룄???뺣낫 (理쒖냼 100 ?섑뵆 ?꾩슂)
@@ -1338,8 +1328,14 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         if (dt > 0.2) dt = 0.2          // 틱 누락 시 큰 점프 방지
 
         val ws = ImuCollector.WINDOW_SIZE
+        // [P77] heading 기준 축 보정 — 사용자가 portrait 으로 폰을 잡고 device Y axis (탑)
+        //   방향으로 걷는 자세에 맞춰 device Y axis 의 world heading 을 사용한다.
+        //   기존: atan2(R[1,0], R[0,0]) = device X axis (옆) 의 heading → 90° 어긋남.
+        //   수정: atan2(R[1,1], R[0,1]) = device Y axis (탑) 의 heading.
+        //   rotMat layout (row-major 9): [R00 R01 R02 R10 R11 R12 R20 R21 R22] = [0..8]
+        //   R[0,1] = rotMat[1],  R[1,1] = rotMat[4].
         fun headingAt(t: Int) =
-            atan2(rotMats[t * 9 + 3].toDouble(), rotMats[t * 9].toDouble())
+            atan2(rotMats[t * 9 + 4].toDouble(), rotMats[t * 9 + 1].toDouble())
 
         // 윈도우 내 heading 변화 (제자리 회전 감쇠 판정용)
         var yawSpan = headingAt(ws - 1) - headingAt(0)
@@ -1417,6 +1413,39 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         modelPosX = netPosX
         modelPosY = netPosY
 
+        // [P78] window-start ablation — 논문 §3.3 "윈도우 시작 회전 하나만으로 근사" 시연.
+        //   *전처리만* 다르고 (per-sample → window-start) 후처리는 PATH_B 와 동일.
+        //   토글 enableEkfTrajectory (변수명 P73 잔재, 의미 재정의) ON 시에만 실행.
+        if (enableEkfTrajectory) {
+            try {
+                val poWorldWindow = transformWindowRotVecWindowStartOnly(window, rotMats)
+                val poResult = inferEngine.infer(poWorldWindow)
+                val po0 = poResult.disp[0].toDouble()
+                val po1 = poResult.disp[1].toDouble()
+                val poRawXy = sqrt(po0 * po0 + po1 * po1)
+                val poScale = if (USE_ADAPTIVE_SCALE) {
+                    when {
+                        poRawXy >= ADAPTIVE_RAW_OUTLIER -> 1.0
+                        poRawXy <  ADAPTIVE_SCALE_THRESH[0] -> ADAPTIVE_SCALE_VALUES[0]
+                        poRawXy <  ADAPTIVE_SCALE_THRESH[1] -> ADAPTIVE_SCALE_VALUES[1]
+                        poRawXy <  ADAPTIVE_SCALE_THRESH[2] -> ADAPTIVE_SCALE_VALUES[2]
+                        else                               -> ADAPTIVE_SCALE_VALUES[3]
+                    }
+                } else 1.0
+                val poSpeed = (poRawXy * poScale / winSec).coerceAtMost(MAX_EFFECTIVE_SPEED)
+                val poHeading = headingAt(ws - 1)   // PATH_B 와 동일 heading 사용
+                preprocOffPosX += poSpeed * cos(poHeading) * dt
+                preprocOffPosY += poSpeed * sin(poHeading) * dt
+                if (drTickCount % 20 == 0) {
+                    Log.i(TAG, "[P78] preproc-OFF disp=[${"%.3f".format(po0)}, ${"%.3f".format(po1)}] " +
+                            "|xy|=${"%.3f".format(poRawXy)}  speed=${"%.2f".format(poSpeed)}m/s " +
+                            "pos=[${"%.2f".format(preprocOffPosX)}, ${"%.2f".format(preprocOffPosY)}]")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "[P78] preproc-OFF 추론 예외: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+
         // 주기적 로그 (~1초마다)
         if (drTickCount++ % 20 == 0) {
             Log.i(TAG, "[DR] cls=${result.topClass}(${result.className}) " +
@@ -1440,6 +1469,9 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 // [P68-6] currentAnchor 사용 — long-press 변경 후 즉시 반영.
                 pathLatLngList.add(meterOffsetToLatLng(currentAnchor, netPosX, netPosY))
                 if (pathLatLngList.size > 5000) pathLatLngList.removeAt(0)
+                // [P78] window-start ablation 동기 누적 (전처리 OFF polyline 입력)
+                pathLatLngEkfList.add(meterOffsetToLatLng(currentAnchor, preprocOffPosX, preprocOffPosY))
+                if (pathLatLngEkfList.size > 5000) pathLatLngEkfList.removeAt(0)
             }
         }
 
@@ -1495,6 +1527,59 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
             val m12 = -sinZ * r2 + cosZ * r5
             val m20 = r6; val m21 = r7; val m22 = r8
 
+            // linAcc (ch 0-2)
+            val lx = window[0 * ws + t].toDouble()
+            val ly = window[1 * ws + t].toDouble()
+            val lz = window[2 * ws + t].toDouble()
+            out[0 * ws + t] = (m00 * lx + m01 * ly + m02 * lz).toFloat()
+            out[1 * ws + t] = (m10 * lx + m11 * ly + m12 * lz).toFloat()
+            out[2 * ws + t] = (m20 * lx + m21 * ly + m22 * lz).toFloat()
+            // gyr (ch 3-5)
+            val gx = window[3 * ws + t].toDouble()
+            val gy = window[4 * ws + t].toDouble()
+            val gz = window[5 * ws + t].toDouble()
+            out[3 * ws + t] = (m00 * gx + m01 * gy + m02 * gz).toFloat()
+            out[4 * ws + t] = (m10 * gx + m11 * gy + m12 * gz).toFloat()
+            out[5 * ws + t] = (m20 * gx + m21 * gy + m22 * gz).toFloat()
+        }
+        return out
+    }
+
+    // ── [P78] 전처리 OFF 변환 — 윈도우 시작 시점 회전행렬만 사용 ───
+    /**
+     * 학술 시연용 ablation: 논문 §3.3 의 "윈도우 시작 회전 하나만으로 근사" 케이스.
+     *   본 함수는 모든 sample t 에 대해 *고정* R(q_start) 회전을 적용한다 —
+     *   즉 윈도우 내부의 자세 변화 (per-timestep rotMat 변동) 가 완전히 무시됨.
+     *   결과: 입력이 훈련 분포 (per-timestep gravity-aligned) 를 이탈 → 모델 출력 품질 저하.
+     *   전처리 ON (transformWindowRotVec) 와의 시각 비교로 논문 주장 입증.
+     *   학술 시연 종료 후 제거 예정.
+     */
+    private fun transformWindowRotVecWindowStartOnly(
+        window: FloatArray, rotMats: FloatArray
+    ): FloatArray {
+        val ws  = ImuCollector.WINDOW_SIZE
+        val out = FloatArray(window.size)
+
+        // 윈도우 시작 yaw 제거 (정상 경로와 동일).
+        val yaw0 = atan2(rotMats[3].toDouble(), rotMats[0].toDouble())
+        val cosZ = cos(yaw0)
+        val sinZ = sin(yaw0)
+
+        // R(q_start) — 윈도우 시작 시점의 단 하나의 rotMat 만 사용.
+        val r0 = rotMats[0].toDouble();    val r1 = rotMats[1].toDouble(); val r2 = rotMats[2].toDouble()
+        val r3 = rotMats[3].toDouble();    val r4 = rotMats[4].toDouble(); val r5 = rotMats[5].toDouble()
+        val r6 = rotMats[6].toDouble();    val r7 = rotMats[7].toDouble(); val r8 = rotMats[8].toDouble()
+
+        // M = R_yaw_inv · R(q_start)
+        val m00 =  cosZ * r0 + sinZ * r3
+        val m01 =  cosZ * r1 + sinZ * r4
+        val m02 =  cosZ * r2 + sinZ * r5
+        val m10 = -sinZ * r0 + cosZ * r3
+        val m11 = -sinZ * r1 + cosZ * r4
+        val m12 = -sinZ * r2 + cosZ * r5
+        val m20 = r6; val m21 = r7; val m22 = r8
+
+        for (t in 0 until ws) {
             // linAcc (ch 0-2)
             val lx = window[0 * ws + t].toDouble()
             val ly = window[1 * ws + t].toDouble()

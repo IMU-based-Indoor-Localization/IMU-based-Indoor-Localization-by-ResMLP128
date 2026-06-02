@@ -46,9 +46,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         captionTextSize = 12f
     }
 
-    // [P73] EKF 궤적 polyline (보라 점선) — 기존 EKF 모드를 부가 궤적으로.
-    //   PATH_B (파랑) 와 *병렬* 실행. 토글 ON 시 EKF measurement 흐름 진행 +
-    //   ekfPosJob (ViewModel) 이 EkfBridge.getPosition 을 50ms 마다 누적.
+    // [P78] "전처리 OFF" 궤적 polyline (보라 점선) — 논문 §3.3 ablation 시각화.
+    //   PATH_B (파랑) 와 *병렬* 실행. 토글 ON 시 window-start-only 회전 + 동일 후처리.
+    //   변수명 ekfPolyline / ekfVisible 은 P73 → P78 의미 재정의 (라벨만 변경).
     //   학술 시연 종료 후 제거 예정.
     private val ekfPolyline = PolylineOverlay().apply {
         color = android.graphics.Color.parseColor("#9C27B0")  // 보라 (Material Purple 500)
@@ -75,6 +75,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     // [P68-5] 표시 모드 토글 (false=격자 TrackView 기본, true=Naver Map)
     private var isMapMode: Boolean = false
 
+    companion object {
+        // [P79-1] 네이버 지도 전체 비활성화 스위치 — 현재 우선순위는 PC OxIOD 전처리 ablation.
+        //   false: MapFragment getMapAsync 미호출 → 네이버 네트워크 호출/지도 init 0.
+        //          격자(TrackView) 단독 표시. 메뉴의 지도 토글 2개도 hide (menu_main.xml).
+        //   재활성화 (방향 확인 테스트 시): 본 값 true + menu_main.xml 의
+        //          action_toggle_view / action_toggle_ekf visible="true".
+        private const val MAP_ENABLED = false
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -84,11 +93,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         viewModel = ViewModelProvider(this)[LocalizationViewModel::class.java]
 
         // [P68-4] MapFragment 획득 → onMapReady 콜백 등록
-        val mf = supportFragmentManager.findFragmentById(R.id.map) as MapFragment?
-            ?: MapFragment.newInstance().also {
-                supportFragmentManager.beginTransaction().add(R.id.map, it).commit()
-            }
-        mf.getMapAsync(this)
+        // [P79-1] MAP_ENABLED=false 면 지도 init 전체 skip (네이버 네트워크 호출 0).
+        if (MAP_ENABLED) {
+            val mf = supportFragmentManager.findFragmentById(R.id.map) as MapFragment?
+                ?: MapFragment.newInstance().also {
+                    supportFragmentManager.beginTransaction().add(R.id.map, it).commit()
+                }
+            mf.getMapAsync(this)
+        }
 
         // [P68-4] polyline 초기 스타일 (실제 map 연결은 onMapReady 에서)
         pathPolyline.color = Color.parseColor("#1565C0")  // 파랑
@@ -278,11 +290,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     /**
-     * [P76] "전처리 OFF 궤적" 토글 (보라 점선).
-     *   라벨상 "전처리 OFF" 라고 표시되지만 내부 동작은 [P73] EKF measurement flow 그대로.
-     *   ON: enableEkfTrajectory=true → PATH_B 와 *병렬* 로 EKF measurement 흐름 실행 +
-     *       ekfPosJob 이 50ms 마다 getPosition 누적.
-     *   OFF: EKF measurement 흐름 skip (propagation 만 계속), polyline 갱신 멈춤.
+     * [P78] "전처리 OFF 궤적" 토글 (보라 점선).
+     *   논문 §3.3 의 "윈도우 시작 회전 하나만으로 근사" ablation 시각화.
+     *   ON: enableEkfTrajectory=true → PATH_B 와 *병렬* 로 두 번째 inference 실행,
+     *       단 입력은 transformWindowRotVecWindowStartOnly (per-sample 회전 무시) 사용.
+     *       후처리 (adaptive scale + RotVec heading + clamp) 는 PATH_B 와 동일.
+     *   OFF: ablation inference skip, polyline 갱신 멈춤.
+     *   변수명 (ekfVisible, enableEkfTrajectory) 는 P73 잔재 — 의미만 ablation 으로 재정의.
      *   학술 시연 종료 후 제거 예정.
      */
     private fun toggleEkf(menuItem: MenuItem) {

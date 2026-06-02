@@ -18,7 +18,7 @@ import com.google.android.gms.location.Priority
  * FusedLocationProviderClient 를 사용해 GPS 위치를 수신하고 콜백으로 전달한다.
  *
  * [P68-2] map branch 의 GpsTracker.kt 그대로 도입. *코드만 추가, 호출 없음* —
- *  실내 시연 (백석역 anchor 고정) 은 GPS 미사용. 옥외 시연 옵션 토글은 추후 결정.
+ *  실내 시연 (국민대 미래관 anchor 고정) 은 GPS 미사용. 옥외 시연 옵션 토글은 추후 결정.
  *
  * 사용법 (호출 시):
  *   val gps = GpsTracker(context)
