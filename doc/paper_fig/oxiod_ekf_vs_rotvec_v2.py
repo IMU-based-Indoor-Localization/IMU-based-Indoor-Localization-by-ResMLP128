@@ -77,9 +77,10 @@ def rmse_anchor(traj_xy, pos_gt, win_idx):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--seq", default="oxford_handheld_13")
+    ap.add_argument("--seq", default="oxford_handheld_1")
     ap.add_argument("--state", type=int, default=2)
     ap.add_argument("--scale", type=float, default=0.001)
+    ap.add_argument("--seconds", type=float, default=0.0, help="panel(a) 표시 구간(s). 0=전체")
     args = ap.parse_args()
     dev = torch.device("cpu")
     print(f"[1] out_regression 로드"); model, mean, std = load_reg(MODEL_DIR, dev)
@@ -110,14 +111,21 @@ def main():
 
     origin = pos_gt[0, :2]
     gt_xy = pos_gt[:, :2] - origin; nx = net_pos[:, :2] - origin; ex = ekf_xy - origin
+    # panel(a): 가독성 위해 첫 N초 구간만 (§4.4 short_traj 방식). panel(b)·캡션 수치는 전체.
+    if args.seconds and args.seconds > 0:
+        S = int(args.seconds * 100); nA = int(args.seconds) + 1
+        gtp = gt_xy[:S]; exp_ = ex[:min(S, len(ex))]; nxp = nx[:min(nA, len(nx))]
+        seg = f"첫 {int(args.seconds)}초"
+    else:
+        gtp, exp_, nxp = gt_xy, ex, nx; seg = "전체"
     fig, ax = plt.subplots(1, 2, figsize=(12, 5.0))
-    ax[0].plot(gt_xy[:, 0], gt_xy[:, 1], "-", color="black", lw=2.4, label="GT", zorder=5)
-    ax[0].plot(nx[:, 0], nx[:, 1], "-", color="#1f77b4", lw=1.8, label=f"RotVec-DR (안정 yaw)  ATE {rmse_net:.1f}m")
-    ax[0].plot(ex[:, 0], ex[:, 1], "-", color="#d62728", lw=1.3, alpha=0.85, label=f"EKF (드리프트 yaw)  ATE {rmse_ekf:.1f}m")
-    ax[0].scatter([0], [0], c="k", s=40, zorder=6)
+    ax[0].plot(gtp[:, 0], gtp[:, 1], "-", color="black", lw=2.4, label="GT", zorder=5)
+    ax[0].plot(nxp[:, 0], nxp[:, 1], "-", color="#1f77b4", lw=2.0, marker="o", ms=3, label="RotVec-DR (안정 yaw)")
+    ax[0].plot(exp_[:, 0], exp_[:, 1], "-", color="#d62728", lw=1.6, alpha=0.9, label="EKF (드리프트 yaw)")
+    ax[0].scatter([0], [0], c="k", s=45, zorder=6, label="시작")
     ax[0].set_aspect("equal", "datalim"); ax[0].legend(fontsize=9, loc="best"); ax[0].grid(ls=":", alpha=0.4)
     ax[0].set_xlabel("X (m)"); ax[0].set_ylabel("Y (m)")
-    ax[0].set_title(f"(a) 궤적 — EKF 발산 vs RotVec 추종 (handheld)", fontsize=10)
+    ax[0].set_title(f"(a) 궤적 ({seg}) — EKF 발산 vs RotVec 추종", fontsize=10)
     ax[1].axhspan(-10, 10, color="#2ca02c", alpha=0.10, label="±10° 예산")
     ax[1].plot(t_sec, ekf_err, "-", color="#d62728", lw=1.6, label="EKF yaw 오차 (vs GT)")
     ax[1].axhline(0, color="#1f77b4", lw=2.0, label="RotVec yaw 오차 ≈ 0")
