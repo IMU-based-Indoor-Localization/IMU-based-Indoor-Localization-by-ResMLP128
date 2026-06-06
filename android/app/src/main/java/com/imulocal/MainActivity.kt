@@ -1,13 +1,19 @@
 package com.imulocal
 
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
+import android.text.InputType
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.widget.EditText
 import android.widget.SeekBar
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
@@ -75,6 +81,19 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     // [P68-5] 표시 모드 토글 (false=격자 TrackView 기본, true=Naver Map)
     private var isMapMode: Boolean = false
 
+    // [P84] 평면도 오버레이 모드 (격자 ↔ 평면도). 체크포인트 기록 모드 플래그.
+    private var isFloorPlanMode: Boolean = false
+    private var checkpointMode: Boolean = false
+    /** 외부에서 고른 평면도를 복사 보관하는 영구 경로 — 재시작 시 자동 로드. */
+    private val floorPlanFile: java.io.File
+        get() = java.io.File(java.io.File(getExternalFilesDir(null), "floorplan"), "current.png")
+
+    // [P84] SAF 문서 선택기 — 갤러리/파일에서 평면도 PNG/JPG 선택 → 앱 영역에 복사 후 로드.
+    private val openFloorPlanLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+            if (uri != null) importFloorPlan(uri)
+        }
+
     companion object {
         // [P79-1] 네이버 지도 전체 비활성화 스위치 — 현재 우선순위는 PC OxIOD 전처리 ablation.
         //   false: MapFragment getMapAsync 미호출 → 네이버 네트워크 호출/지도 init 0.
@@ -113,6 +132,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             viewModel.reset()
             // [P68-5] 두 view 모두 초기화 (어느 모드든 대응)
             binding.trackView.clearPath()
+            // [P84] 평면도 오버레이도 초기화 (궤적·체크포인트·보정 클리어)
+            binding.floorPlanView.clearPath()
+            binding.floorPlanView.setMode(FloorPlanView.Mode.NONE)
+            checkpointMode = false
             pathPolyline.map = null
             naverMap?.let { pathPolyline.map = it }
             lastPathSize = 0
@@ -189,6 +212,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 // [P68-5] 두 view 동시 갱신 — 토글 visibility 와 무관.
                 //   격자 TrackView (P66 1m 격자, 미터 좌표)
                 binding.trackView.updatePaths(s.trackPoints, emptyList())
+                //   [P84] 평면도 오버레이도 동일 궤적 갱신 (보정돼 있으면 정렬되어 그려짐)
+                binding.floorPlanView.updateTrajectory(s.trackPoints)
                 //   지도 polyline (P68-3 LatLng 변환, size 변화 시만 GL 갱신)
                 if (s.pathLatLng.size >= 2 && s.pathLatLng.size != lastPathSize) {
                     naverMap?.let {
@@ -212,6 +237,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 }
             }
         }
+
+        // [P84] 평면도 오버레이 초기화 — 저장된 평면도 로드 + 보정/체크포인트 콜백
+        setupFloorPlan()
     }
 
     // [P68-4 / fix] Naver Map 준비 콜백
@@ -277,6 +305,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 exportPath()
                 true
             }
+            R.id.action_toggle_unitfix -> { toggleUnitFix(item); true }
             R.id.action_toggle_view -> {
                 toggleView(item)
                 true
@@ -285,6 +314,12 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 toggleEkf(item)
                 true
             }
+            // [P84] 평면도 오버레이
+            R.id.action_toggle_floorplan -> { toggleFloorPlanView(item); true }
+            R.id.action_load_floorplan -> { openFloorPlanLauncher.launch(arrayOf("image/*")); true }
+            R.id.action_calib_floorplan -> { startFloorPlanCalibration(); true }
+            R.id.action_toggle_checkpoint -> { toggleCheckpointMode(item); true }
+            R.id.action_export_checkpoint -> { exportCheckpoints(); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
@@ -415,6 +450,23 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         viewModel.start(replayCsv = replayFile)
     }
 
+    /**
+     * [P85] 단위보정(A) 토글 — InferenceEngine.USE_OOD_FIX on/off.
+     *   ON: linAcc÷9.81(g단위) + 적응스케일 1.0× (과대보정 제거). replay/측위 A/B 비교용.
+     *   토글 후에는 [초기화] 하고 측위/Replay 를 다시 실행해야 새 설정이 궤적에 반영됨.
+     */
+    private fun toggleUnitFix(item: MenuItem) {
+        InferenceEngine.USE_OOD_FIX = !InferenceEngine.USE_OOD_FIX
+        val on = InferenceEngine.USE_OOD_FIX
+        item.title = if (on) "단위보정(A): ON" else "단위보정(A): OFF"
+        Toast.makeText(
+            this,
+            if (on) "단위보정(A) ON — [초기화] 후 측위/Replay 다시 실행"
+            else "단위보정(A) OFF (기존 동작) — [초기화] 후 다시 실행",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
     private fun exportPath() {
         val points = viewModel.state.value.trackPoints
         if (points.isEmpty()) {
@@ -434,5 +486,158 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         )
         file.writeText(csv)
         Toast.makeText(this, "경로 저장: ${file.name}", Toast.LENGTH_LONG).show()
+    }
+
+    // ───────────────────────── [P84] 평면도 오버레이 ─────────────────────────
+
+    /** 저장된 평면도 로드 + FloorPlanView 콜백 연결. onCreate 말미 1회 호출. */
+    private fun setupFloorPlan() {
+        loadFloorPlanFromDisk()
+        binding.floorPlanView.onScalePointsReady = { showScaleDistanceDialog() }
+        binding.floorPlanView.onCalibrationReady = {
+            Toast.makeText(this, "보정 완료 — 궤적이 평면도에 정렬됨", Toast.LENGTH_SHORT).show()
+        }
+        binding.floorPlanView.onCheckpointAdded = { idx ->
+            Toast.makeText(this, "체크포인트 C${idx + 1} 기록", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** 앱 영역에 보관된 평면도(current.png)가 있으면 디코드해 표시. */
+    private fun loadFloorPlanFromDisk(): Boolean {
+        val f = floorPlanFile
+        if (!f.exists()) return false
+        val bmp = BitmapFactory.decodeFile(f.absolutePath) ?: return false
+        binding.floorPlanView.setFloorPlan(bmp)
+        return true
+    }
+
+    /** SAF 로 고른 이미지(uri)를 앱 영역에 복사 후 로드. (재시작에도 유지) */
+    private fun importFloorPlan(uri: Uri) {
+        try {
+            val dir = floorPlanFile.parentFile
+            if (dir != null && !dir.exists()) dir.mkdirs()
+            contentResolver.openInputStream(uri)?.use { input ->
+                floorPlanFile.outputStream().use { output -> input.copyTo(output) }
+            }
+            if (loadFloorPlanFromDisk()) {
+                Toast.makeText(this, "평면도 불러오기 완료 (${floorPlanFile.length() / 1024} KB)", Toast.LENGTH_SHORT).show()
+                if (!isFloorPlanMode) Toast.makeText(this, "메뉴 → '표시 모드: 격자 → 평면도' 로 전환하세요", Toast.LENGTH_LONG).show()
+            } else {
+                Toast.makeText(this, "이미지 디코드 실패", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(this, "평면도 불러오기 오류: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** 격자(TrackView) ↔ 평면도(FloorPlanView) 토글. 지도 모드와 독립. */
+    private fun toggleFloorPlanView(menuItem: MenuItem) {
+        isFloorPlanMode = !isFloorPlanMode
+        if (isFloorPlanMode) {
+            if (!binding.floorPlanView.hasFloorPlan() && !loadFloorPlanFromDisk()) {
+                Toast.makeText(this, "먼저 '평면도 불러오기'로 이미지를 선택하세요", Toast.LENGTH_LONG).show()
+            }
+            binding.trackView.visibility = View.INVISIBLE
+            binding.floorPlanView.visibility = View.VISIBLE
+            menuItem.title = "표시 모드: 평면도 → 격자"
+        } else {
+            binding.floorPlanView.visibility = View.INVISIBLE
+            binding.trackView.visibility = View.VISIBLE
+            menuItem.title = "표시 모드: 격자 → 평면도"
+        }
+    }
+
+    /** 2점 보정 시작 — 평면도에서 시작·끝 위치를 차례로 탭하도록 모드 전환. */
+    private fun startFloorPlanCalibration() {
+        if (!isFloorPlanMode) {
+            Toast.makeText(this, "먼저 평면도 모드로 전환하세요", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (viewModel.state.value.trackPoints.size < 2) {
+            Toast.makeText(this, "보정 기준 궤적이 없습니다 — 측위/Replay 후 시도하세요", Toast.LENGTH_LONG).show()
+            return
+        }
+        binding.floorPlanView.setMode(FloorPlanView.Mode.CALIBRATE)
+        Toast.makeText(this, "①거리를 아는 두 점을 탭하세요 (다음 화면에서 실거리 입력)", Toast.LENGTH_LONG).show()
+    }
+
+    /** ①스케일 단계 — 방금 찍은 두 점의 실제 거리(m) 입력 → px/m 확정, ②단계로 진행. */
+    private fun showScaleDistanceDialog() {
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            hint = "예: 11.2"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("① 스케일: 실제 거리(m)")
+            .setMessage("방금 찍은 두 점의 실제 거리를 입력하세요.\n(예: 강의실 한 칸 = 11.2 m — 도면 치수선 참고)")
+            .setView(input)
+            .setPositiveButton("다음") { _, _ ->
+                val v = input.text.toString().toDoubleOrNull()
+                if (v != null && v > 0) {
+                    binding.floorPlanView.setScaleFromRealDistance(v)
+                    Toast.makeText(this, "②출발 지점 → 처음 걸어간 방향을 탭하세요", Toast.LENGTH_LONG).show()
+                } else {
+                    binding.floorPlanView.cancelCalibration()
+                    Toast.makeText(this, "거리 입력이 올바르지 않아 보정을 취소했습니다", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("취소") { _, _ -> binding.floorPlanView.cancelCalibration() }
+            .setCancelable(false)
+            .show()
+    }
+
+    /** 체크포인트 기록 모드 토글. ON 동안 평면도 탭 = 체크포인트(참위치) 기록. */
+    private fun toggleCheckpointMode(menuItem: MenuItem) {
+        if (!isFloorPlanMode) {
+            Toast.makeText(this, "먼저 평면도 모드로 전환하세요", Toast.LENGTH_SHORT).show()
+            return
+        }
+        checkpointMode = !checkpointMode
+        if (checkpointMode) {
+            binding.floorPlanView.setMode(FloorPlanView.Mode.CHECKPOINT)
+            menuItem.title = "체크포인트 기록 중지"
+            Toast.makeText(this, "랜드마크 지날 때 평면도를 탭하세요", Toast.LENGTH_LONG).show()
+        } else {
+            binding.floorPlanView.setMode(FloorPlanView.Mode.NONE)
+            menuItem.title = "체크포인트 기록 시작"
+        }
+    }
+
+    /**
+     * 체크포인트 CSV 내보내기. 보정 transform 으로 참위치(image-px)→world(m) 환산,
+     * 탭 순간 궤적 추정위치(est)와 함께 오차(ATE)까지 기록.
+     * 컬럼: idx,t_ms,est_x_m,est_y_m,true_x_m,true_y_m,err_m
+     */
+    private fun exportCheckpoints() {
+        val cps = binding.floorPlanView.getCheckpoints()
+        if (cps.isEmpty()) {
+            Toast.makeText(this, "체크포인트가 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val calibrated = binding.floorPlanView.isCalibrated()
+        val sb = StringBuilder()
+        sb.appendLine("# floorplan checkpoints")
+        sb.appendLine("# calibrated=$calibrated  n=${cps.size}")
+        sb.appendLine("idx,t_ms,est_x_m,est_y_m,true_x_m,true_y_m,err_m,label")
+        val errs = mutableListOf<Double>()
+        cps.forEachIndexed { i, cp ->
+            val tw = binding.floorPlanView.imageToWorld(cp.imgX, cp.imgY)
+            val tx = tw?.first; val ty = tw?.second
+            val err = if (tw != null) Math.hypot(tx!! - cp.estX, ty!! - cp.estY) else Double.NaN
+            if (!err.isNaN()) errs.add(err)
+            sb.appendLine(
+                "${i + 1},${cp.tMs},${cp.estX},${cp.estY}," +
+                "${tx ?: ""},${ty ?: ""},${if (err.isNaN()) "" else err},${cp.label}"
+            )
+        }
+        if (errs.isNotEmpty()) {
+            val mean = errs.average()
+            val rmse = Math.sqrt(errs.sumOf { it * it } / errs.size)
+            sb.appendLine("# checkpoint ATE: mean=${"%.3f".format(mean)} m  rmse=${"%.3f".format(rmse)} m")
+        }
+        val file = java.io.File(getExternalFilesDir(null), "checkpoints_${System.currentTimeMillis()}.csv")
+        file.writeText(sb.toString())
+        val ateMsg = if (errs.isNotEmpty()) "  ATE=%.2fm".format(errs.average()) else "  (미보정)"
+        Toast.makeText(this, "체크포인트 저장: ${file.name}$ateMsg", Toast.LENGTH_LONG).show()
     }
 }

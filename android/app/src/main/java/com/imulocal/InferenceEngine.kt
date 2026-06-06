@@ -47,7 +47,10 @@ class InferenceEngine(private val context: Context) {
         //
         // 토글 OFF: 기존 동작 (linAcc m/s² 그대로 normalize).
         // 토글 ON:  학습 분포 매칭 시도.
-        private const val USE_OOD_FIX = false  // P47-OOD rollback: norm std 매칭 성공(1.06)했으나 실측 ekf 5.75m로 악화 → 단위 fix 단독으로 부족. P47-D (R=10) baseline 유지
+        // [P85] 단위보정(A) — 런타임 토글. ON: linAcc÷9.81(g단위 매칭) + (ViewModel) 적응스케일 1.0×.
+        //   OFF(기본): 기존 동작(m/s² 그대로 + P67 적응스케일 2.5~7×). 메뉴에서 토글, replay A/B 비교용.
+        //   (과거 P47-OOD: 단위fix 단독은 EKF 5.75m 악화로 롤백 — 지금은 PATH_B/적응스케일과 묶어 재시험)
+        @Volatile @JvmStatic var USE_OOD_FIX = false
         private const val GRAVITY = 9.81f
 
         // ─────────────────────────────────────────────────────────

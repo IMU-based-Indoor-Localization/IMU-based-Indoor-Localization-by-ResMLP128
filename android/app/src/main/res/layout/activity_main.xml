@@ -108,6 +108,16 @@
             android:layout_height="match_parent"
             android:visibility="invisible"/>
 
+        <!-- [P84] 평면도 오버레이 모드 (토글 시 visible). 외부 평면도 이미지 위에
+             궤적 폴리라인 + 체크포인트(GT) 를 그린다. 2점 보정으로 world(m)↔평면도 정렬. -->
+        <com.imulocal.FloorPlanView
+            android:id="@+id/floorPlanView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#FAFAFA"
+            android:elevation="2dp"
+            android:visibility="invisible"/>
+
         <!-- [P74] 재생 슬라이더 + 시간 라벨 (지도 모드일 때만 보임, 항상 하단).
              scrub 모드: 0~100% 위치의 polyline 인덱스에 cursor marker 배치.
              100% = 라이브 (자동 추적). 100% 미만 = 사용자 scrub. 학술 시연 종료 후 제거 예정. -->

@@ -1363,7 +1363,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //   rawXy 가 작으면(정지/떨림) 약하게, 크면(빠른 보행 saturation 천장)
         //   강하게 곱한다. 단일 scale 의 작은변위 과대/큰변위 과소 동시 완화.
         // [P67-C] raw outlier (raw > 0.7) 는 saturation 위 비정상 값 → 신뢰 안 함 (1.0×).
-        val scaleEff: Double = if (USE_ADAPTIVE_SCALE) {
+        val scaleEff: Double = if (InferenceEngine.USE_OOD_FIX) 1.0  // [P85] 단위보정(A): 적응스케일 미적용(과대보정 제거)
+        else if (USE_ADAPTIVE_SCALE) {
             if (rawXy > ADAPTIVE_RAW_OUTLIER) 1.0
             else {
                 var s = ADAPTIVE_SCALE_VALUES.last()
@@ -1423,7 +1424,8 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
                 val po0 = poResult.disp[0].toDouble()
                 val po1 = poResult.disp[1].toDouble()
                 val poRawXy = sqrt(po0 * po0 + po1 * po1)
-                val poScale = if (USE_ADAPTIVE_SCALE) {
+                val poScale = if (InferenceEngine.USE_OOD_FIX) 1.0  // [P85] 단위보정(A)
+                else if (USE_ADAPTIVE_SCALE) {
                     when {
                         poRawXy >= ADAPTIVE_RAW_OUTLIER -> 1.0
                         poRawXy <  ADAPTIVE_SCALE_THRESH[0] -> ADAPTIVE_SCALE_VALUES[0]
