@@ -242,6 +242,16 @@
                 android:text="Replay (latest.csv 재생)"
                 app:icon="@android:drawable/ic_media_play"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
+
+            <!-- [P87] GT 마크 버튼 (웨이포인트 통과) — 볼륨키로도 마크 가능 -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnMark"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="마크 (웨이포인트 통과) · 볼륨키 가능"
+                app:backgroundTint="#6A1B9A"
+                android:textColor="#FFFFFF"/>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 </LinearLayout>

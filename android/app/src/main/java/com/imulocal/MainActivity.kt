@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
+import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
@@ -84,6 +85,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     // [P84] 평면도 오버레이 모드 (격자 ↔ 평면도). 체크포인트 기록 모드 플래그.
     private var isFloorPlanMode: Boolean = false
     private var checkpointMode: Boolean = false
+
+    // [P87] 절대 GT 마크 — 웨이포인트 통과 시 (est_x, est_y, t_ms) 기록. 볼륨키/버튼.
+    private val gtMarks = mutableListOf<Triple<Double, Double, Long>>()
     /** 외부에서 고른 평면도를 복사 보관하는 영구 경로 — 재시작 시 자동 로드. */
     private val floorPlanFile: java.io.File
         get() = java.io.File(java.io.File(getExternalFilesDir(null), "floorplan"), "current.png")
@@ -136,6 +140,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             binding.floorPlanView.clearPath()
             binding.floorPlanView.setMode(FloorPlanView.Mode.NONE)
             checkpointMode = false
+            gtMarks.clear()   // [P87] GT 마크 초기화
             pathPolyline.map = null
             naverMap?.let { pathPolyline.map = it }
             lastPathSize = 0
@@ -164,6 +169,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         })
         // [P45-Replay] Replay 버튼 — 단말의 imu_csv/replay/latest.csv 를 재생
         binding.btnReplay.setOnClickListener { startReplay() }
+        // [P87] 마크 버튼 (웨이포인트 통과) — 볼륨키로도 가능 (onKeyDown)
+        binding.btnMark.setOnClickListener { addMark() }
 
         // ── 상태 관찰 ────────────────────────────────────────────
         lifecycleScope.launch {
@@ -290,6 +297,53 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         viewModel.start()
     }
 
+    // [P87] 측위 중 볼륨키(UP/DOWN) = GT 마크 (eyes-free). 측위 중이 아니면 기본 볼륨 동작.
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if ((keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+            && viewModel.state.value.isRunning) {
+            addMark()
+            return true   // 소비 → 볼륨 UI 안 뜸
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    // [P87] 측위 중 볼륨키 up 도 소비 (key-up 시 볼륨 변경/비프 방지)
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        if ((keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+            && viewModel.state.value.isRunning) {
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
+    }
+
+    /** [P87] 웨이포인트 통과 마크 — 현재 추정 위치(est)와 시각을 기록. */
+    private fun addMark() {
+        val s = viewModel.state.value
+        if (!s.isRunning) {
+            Toast.makeText(this, "측위 중에만 마크 가능 — [시작] 후 사용", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val x = s.position.first; val y = s.position.second
+        gtMarks.add(Triple(x, y, System.currentTimeMillis()))
+        Toast.makeText(this, "마크 #${gtMarks.size}  est(%.2f, %.2f)".format(x, y), Toast.LENGTH_SHORT).show()
+    }
+
+    /** [P87] GT 마크 CSV 내보내기 — idx,est_x_m,est_y_m,t_ms. 웨이포인트 좌표는 오프라인 매칭. */
+    private fun exportMarks() {
+        if (gtMarks.isEmpty()) {
+            Toast.makeText(this, "마크가 없습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val sb = StringBuilder()
+        sb.appendLine("# GT marks (P87) — est position at waypoint passage")
+        sb.appendLine("# n=${gtMarks.size}")
+        sb.appendLine("idx,est_x_m,est_y_m,t_ms")
+        gtMarks.forEachIndexed { i, (x, y, t) -> sb.appendLine("${i + 1},$x,$y,$t") }
+        val file = java.io.File(getExternalFilesDir(null), "marks_${System.currentTimeMillis()}.csv")
+        file.writeText(sb.toString())
+        Toast.makeText(this, "마크 저장: ${file.name} (${gtMarks.size}개)", Toast.LENGTH_LONG).show()
+    }
+
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.menu_main, menu)
         return true
@@ -320,6 +374,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             R.id.action_calib_floorplan -> { startFloorPlanCalibration(); true }
             R.id.action_toggle_checkpoint -> { toggleCheckpointMode(item); true }
             R.id.action_export_checkpoint -> { exportCheckpoints(); true }
+            R.id.action_export_marks -> { exportMarks(); true }
             else -> super.onOptionsItemSelected(item)
         }
     }
