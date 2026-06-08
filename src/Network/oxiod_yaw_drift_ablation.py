@@ -70,7 +70,8 @@ def make_drifted_quat(quat: np.ndarray, drift_rate_deg_s: float) -> np.ndarray:
     n = len(quat)
     t = np.arange(n) / FS
     drift_rad = np.deg2rad(drift_rate_deg_s) * t
-    Rz = Rot.from_euler("z", drift_rad)          # [N] world-yaw offset
+    # scipy>=1.16: 단일축 다중회전은 (N,1) 형태 요구 (1D 는 단일회전 N각으로 해석돼 에러)
+    Rz = Rot.from_euler("z", drift_rad.reshape(-1, 1))   # [N] world-yaw offset
     Rtrue = Rot.from_quat(quat)                   # body→world (true)
     Rdrift = Rz * Rtrue                           # apply Rtrue then Rz
     return Rdrift.as_quat().astype(np.float32)
