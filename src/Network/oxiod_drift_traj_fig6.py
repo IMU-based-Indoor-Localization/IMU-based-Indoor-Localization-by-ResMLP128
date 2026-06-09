@@ -88,7 +88,7 @@ def main():
     ax.scatter([0], [0], c="k", s=45, zorder=6, label="시작")
     ax.set_aspect("equal", "datalim"); ax.legend(fontsize=8.5, loc="best"); ax.grid(ls=":", alpha=0.4)
     ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
-    ax.set_title(f"그림 6. 입력 yaw 드리프트 궤적 (input_only, {seg}) — {args.seq}", fontsize=10, fontweight="bold")
+    ax.set_title(f"입력 yaw 드리프트 궤적 (input_only, {seg}) — {args.seq}", fontsize=10, fontweight="bold")
     fig.tight_layout()
     out = LOG / "fig_4_6_2_traj.png"; fig.savefig(out, dpi=150)
     print(f"[OK] {out}")
