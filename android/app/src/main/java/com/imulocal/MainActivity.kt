@@ -99,10 +99,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
 
     companion object {
-        // [P79-1→P88 재활성화] 네이버 지도 스위치.
-        //   true: MapFragment init + 메뉴 '표시 모드: 격자↔지도' 사용 가능 (작품 기본 화면).
-        //   지도 모드는 제품 화면 — GT 마크 버튼(P87, 측정용)은 지도 모드에서 숨김.
-        private const val MAP_ENABLED = true
+        // [P88f] 네이버 지도 비활성화 (작품사진 촬영 완료) — 측정/검증 단계 복귀.
+        //   재활성화: 본 값 true + menu_main.xml 의 action_toggle_view / action_rotate_map
+        //   visible="true" (P88/P88b 참조).
+        private const val MAP_ENABLED = false
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
