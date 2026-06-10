@@ -45,6 +45,11 @@
         android:id="@+id/action_toggle_view"
         android:title="표시 모드: 격자 → 지도"
         app:showAsAction="never"/>
+    <!-- [P88b] 지도 표시 경로 회전 (실내 자력계 절대방위 오차 보정, 표시 전용) -->
+    <item
+        android:id="@+id/action_rotate_map"
+        android:title="지도 경로 회전 +90°"
+        app:showAsAction="never"/>
     <item
         android:id="@+id/action_toggle_ekf"
         android:title="전처리 OFF 궤적 표시"

@@ -362,6 +362,21 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 toggleView(item)
                 true
             }
+            // [P88b] 지도 표시 경로 회전 — 누적 경로 재변환 후 polyline 즉시 갱신
+            R.id.action_rotate_map -> {
+                val deg = viewModel.rotateMapPath()
+                val pts = viewModel.state.value.pathLatLng
+                naverMap?.let { m ->
+                    if (pts.size >= 2) {
+                        pathPolyline.coords = pts
+                        pathPolyline.map = m
+                        lastPathSize = pts.size
+                    }
+                }
+                if (isMapMode) updateCursorMarker(pts)
+                Toast.makeText(this, "지도 경로 회전: ${deg}° (표시 전용 — 측정 데이터 불변)", Toast.LENGTH_SHORT).show()
+                true
+            }
             R.id.action_toggle_ekf -> {
                 toggleEkf(item)
                 true

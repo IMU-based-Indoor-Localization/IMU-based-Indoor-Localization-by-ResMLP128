@@ -96,10 +96,19 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         //   사용자가 지도 long-press 로 시작점 이동 시 setAnchor() 로 currentAnchor 갱신.
         val DEFAULT_ANCHOR: LatLng = LatLng(37.6109, 126.9963)
 
-        /** PATH_B trackPoints 미터 변위 → LatLng. 좁은 시연 (~수십m) 단순 근사. */
+        // [P88b] 지도 표시용 경로 회전 오프셋(°) — 실내 자력계 절대방위 오차/프레임 보정.
+        //   표시 레이어(LatLng 변환)에만 적용. 추정기(미터 좌표·trackPoints)는 불변 →
+        //   격자/평면도/마크/논문 측정에는 영향 없음. 메뉴 '지도 경로 회전 +90°'로 순환.
+        @Volatile var mapYawOffsetDeg: Int = 0
+
+        /** PATH_B trackPoints 미터 변위 → LatLng. 좁은 시연 (~수십m) 단순 근사.
+         *  [P88b] mapYawOffsetDeg 만큼 (dx,dy) 를 회전한 뒤 동/북 변위로 변환. */
         fun meterOffsetToLatLng(anchor: LatLng, dxM: Double, dyM: Double): LatLng {
-            val dLat = dyM / 111320.0
-            val dLng = dxM / (111320.0 * cos(Math.toRadians(anchor.latitude)))
+            val r = Math.toRadians(mapYawOffsetDeg.toDouble())
+            val rx = dxM * cos(r) - dyM * sin(r)
+            val ry = dxM * sin(r) + dyM * cos(r)
+            val dLat = ry / 111320.0
+            val dLng = rx / (111320.0 * cos(Math.toRadians(anchor.latitude)))
             return LatLng(anchor.latitude + dLat, anchor.longitude + dLng)
         }
 
@@ -829,6 +838,15 @@ class LocalizationViewModel(application: Application) : AndroidViewModel(applica
         // Yaw drift 蹂댁젙 珥덇린??
         yawRvAtInit          = Double.NaN
         _state.value = LocalizationState()
+    }
+
+    /** [P88b] 지도 경로 회전 +90° — 누적 경로를 새 오프셋으로 재변환해 즉시 반영. */
+    fun rotateMapPath(): Int {
+        mapYawOffsetDeg = (mapYawOffsetDeg + 90) % 360
+        pathLatLngList.clear()
+        trackPoints.forEach { (x, y) -> pathLatLngList.add(meterOffsetToLatLng(currentAnchor, x, y)) }
+        _state.value = _state.value.copy(pathLatLng = pathLatLngList.toList())
+        return mapYawOffsetDeg
     }
 
     // ?? 異붾줎 + EKF 媛깆떊 ?ㅽ뀦 ????????????????????????????????????

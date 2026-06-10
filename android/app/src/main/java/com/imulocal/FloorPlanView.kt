@@ -196,12 +196,14 @@ class FloorPlanView @JvmOverloads constructor(
 
     fun clearCheckpoints() { checkpoints.clear(); invalidate() }
 
-    /** Reset 버튼용 — 궤적·체크포인트·보정 모두 클리어(평면도 비트맵은 유지). */
+    /** Reset 버튼용 — 궤적·체크포인트만 클리어, [P88b] 보정은 유지(평면도 비트맵도 유지).
+     *  → 보정 1회 후 [초기화]→Replay 하면 같은 보행이 평면도 위에 라이브로 다시 그려진다.
+     *  (replay 궤적은 항상 (0,0)에서 시작하므로 원점 anchor 가 그대로 유효.)
+     *  보정을 다시 하려면 메뉴 '평면도 보정'을 다시 실행하면 된다. */
     fun clearPath() {
         trackPoints = emptyList()
         checkpoints.clear()
         calibTaps.clear()
-        calibrated = false
         mode = Mode.NONE
         invalidate()
     }
