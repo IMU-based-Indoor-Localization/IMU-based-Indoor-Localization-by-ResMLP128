@@ -50,7 +50,8 @@ class InferenceEngine(private val context: Context) {
         // [P85] 단위보정(A) — 런타임 토글. ON: linAcc÷9.81(g단위 매칭) + (ViewModel) 적응스케일 1.0×.
         //   OFF(기본): 기존 동작(m/s² 그대로 + P67 적응스케일 2.5~7×). 메뉴에서 토글, replay A/B 비교용.
         //   (과거 P47-OOD: 단위fix 단독은 EKF 5.75m 악화로 롤백 — 지금은 PATH_B/적응스케일과 묶어 재시험)
-        @Volatile @JvmStatic var USE_OOD_FIX = false
+        // [P88d] 기본값 ON — A(÷9.81+적응스케일1.0)가 실측 검증 완료(P85), 재설치 시 OFF 리셋 혼란 방지.
+        @Volatile @JvmStatic var USE_OOD_FIX = true
         private const val GRAVITY = 9.81f
 
         // ─────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@
     <!-- [P85] 단위보정(A) 런타임 토글 — replay A/B 비교용 -->
     <item
         android:id="@+id/action_toggle_unitfix"
-        android:title="단위보정(A): OFF"
+        android:title="단위보정(A): ON"
         app:showAsAction="never"/>
     <!-- [P84] 평면도 오버레이 (approach A — 측정/GT용) -->
     <item
