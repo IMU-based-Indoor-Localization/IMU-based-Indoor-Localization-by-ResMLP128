@@ -9,10 +9,11 @@
         android:id="@+id/action_export"
         android:title="경로 내보내기"
         app:showAsAction="never"/>
-    <!-- [P87] GT 마크 내보내기 -->
+    <!-- [P87] GT 마크 내보내기 — [P89] GT 캠페인 휴면으로 임시 hide (MARKS_ENABLED 와 동기) -->
     <item
         android:id="@+id/action_export_marks"
         android:title="마크 내보내기 (GT)"
+        android:visible="false"
         app:showAsAction="never"/>
     <!-- [P85] 단위보정(A) 런타임 토글 — replay A/B 비교용 -->
     <item

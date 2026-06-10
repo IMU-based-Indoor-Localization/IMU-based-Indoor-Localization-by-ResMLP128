@@ -103,6 +103,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         //   재활성화: 본 값 true + menu_main.xml 의 action_toggle_view / action_rotate_map
         //   visible="true" (P88/P88b 참조).
         private const val MAP_ENABLED = false
+
+        // [P89] GT 마크(P87) 임시 비활성화 — 절대 GT 현장 캠페인 종료(분석 완료).
+        //   정밀 GT 재개(측량 웨이포인트·N 확대) 시 본 값 true + menu_main.xml 의
+        //   action_export_marks visible="true" 로 복원.
+        private const val MARKS_ENABLED = false
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -170,6 +175,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         binding.btnReplay.setOnClickListener { startReplay() }
         // [P87] 마크 버튼 (웨이포인트 통과) — 볼륨키로도 가능 (onKeyDown)
         binding.btnMark.setOnClickListener { addMark() }
+        // [P89] GT 캠페인 휴면 — 마크 버튼 숨김
+        if (!MARKS_ENABLED) binding.btnMark.visibility = View.GONE
 
         // ── 상태 관찰 ────────────────────────────────────────────
         lifecycleScope.launch {
@@ -297,8 +304,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     // [P87] 측위 중 볼륨키(UP/DOWN) = GT 마크 (eyes-free). 측위 중이 아니면 기본 볼륨 동작.
+    //   [P89] MARKS_ENABLED=false 면 기본 볼륨 동작 유지.
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if ((keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+        if (MARKS_ENABLED
+            && (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
             && viewModel.state.value.isRunning) {
             addMark()
             return true   // 소비 → 볼륨 UI 안 뜸
@@ -308,7 +317,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
     // [P87] 측위 중 볼륨키 up 도 소비 (key-up 시 볼륨 변경/비프 방지)
     override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
-        if ((keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
+        if (MARKS_ENABLED
+            && (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN)
             && viewModel.state.value.isRunning) {
             return true
         }
@@ -452,8 +462,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             menuItem.title = "표시 모드: 격자 → 지도"
             // [P74] 격자 모드에서는 슬라이더 숨김 (지도 마커도 자동으로 안 보임)
             binding.replayControls.visibility = View.GONE
-            // [P88] 격자(측정) 모드 복귀 — 마크 버튼 다시 표시
-            binding.btnMark.visibility = View.VISIBLE
+            // [P88] 격자(측정) 모드 복귀 — 마크 버튼 다시 표시 ([P89] 휴면 시 유지 숨김)
+            binding.btnMark.visibility = if (MARKS_ENABLED) View.VISIBLE else View.GONE
         }
     }
 
@@ -634,7 +644,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             findViewById<View>(R.id.map)?.visibility = View.INVISIBLE
             binding.replayControls.visibility = View.GONE
             isMapMode = false
-            binding.btnMark.visibility = View.VISIBLE   // 측정 모드 — 마크 버튼 표시
+            binding.btnMark.visibility = if (MARKS_ENABLED) View.VISIBLE else View.GONE   // [P89]
             binding.floorPlanView.visibility = View.VISIBLE
             menuItem.title = "표시 모드: 평면도 → 격자"
         } else {
