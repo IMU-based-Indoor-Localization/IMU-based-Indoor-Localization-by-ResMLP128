@@ -46,7 +46,7 @@ class FloorPlanView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : View(context, attrs, defStyleAttr) {
 
-    enum class Mode { NONE, CALIBRATE, CHECKPOINT }
+    enum class Mode { NONE, CALIBRATE, CHECKPOINT, ALIGN }
 
     // ── 데이터 ────────────────────────────────────────────────────
     private var bitmap: Bitmap? = null
@@ -188,7 +188,26 @@ class FloorPlanView @JvmOverloads constructor(
     fun setMode(m: Mode) {
         mode = m
         if (m == Mode.CALIBRATE) { calibPhase = 1; calibTaps.clear() } else { calibPhase = 0 }
+        // [P88e] 정렬 모드 진입 시 미정렬이면 기본 배치(이미지 중앙, 40% 크기)로 궤적을 띄움
+        if (m == Mode.ALIGN && !calibrated) initDefaultAlign()
         invalidate()
+    }
+
+    /** [P88e] 직접 정렬용 기본 배치 — 궤적 bbox 를 이미지 중앙에 40% 크기로. */
+    private fun initDefaultAlign() {
+        val bmp = bitmap ?: return
+        if (trackPoints.size < 2) return
+        wOx = trackPoints.first().first; wOy = trackPoints.first().second
+        val xs = trackPoints.map { it.first }; val ys = trackPoints.map { it.second }
+        val spanM = maxOf(xs.max() - xs.min(), ys.max() - ys.min()).coerceAtLeast(1.0)
+        sPxPerM = 0.4 * minOf(bmp.width, bmp.height) / spanM
+        theta = 0.0
+        val cxw = (xs.max() + xs.min()) / 2.0
+        val cyw = (ys.max() + ys.min()) / 2.0
+        val px = cxw - wOx; val py = -cyw + wOy      // world'=(x,-y) 오프셋
+        imgOx = (bmp.width / 2f) - (sPxPerM * px).toFloat()
+        imgOy = (bmp.height / 2f) - (sPxPerM * py).toFloat()
+        calibrated = true
     }
 
     fun isCalibrated(): Boolean = calibrated
@@ -362,6 +381,7 @@ class FloorPlanView @JvmOverloads constructor(
                 else -> "보정 중"
             }
             Mode.CHECKPOINT -> "체크포인트 모드 — 랜드마크 지날 때 평면도를 탭 (누적 ${checkpoints.size})"
+            Mode.ALIGN -> "정렬 모드 — 한 손가락=궤적 이동 · 두 손가락=회전/크기 · 완료는 메뉴"
             Mode.NONE -> if (!calibrated && bitmap != null) "표시 모드 — 핀치 확대 · 드래그 이동 · 두 번 탭 = 화면맞춤" else ""
         }
         if (msg.isEmpty()) return
@@ -372,9 +392,83 @@ class FloorPlanView @JvmOverloads constructor(
         canvas.drawText(msg, pad, h - 18f, bannerText)
     }
 
+    // ── [P88e] 직접 정렬(ALIGN) 제스처 상태 ──────────────────────
+    private var alignPrevX = 0f; private var alignPrevY = 0f
+    private var alignPrevDist = 0f; private var alignPrevAng = 0f
+    private var alignTwoFinger = false
+
+    /** 궤적 변환을 이미지 점 P 기준으로 k배 스케일. */
+    private fun applyAlignScale(k: Float, px: Float, py: Float) {
+        sPxPerM *= k
+        imgOx = px + (imgOx - px) * k
+        imgOy = py + (imgOy - py) * k
+    }
+
+    /** 궤적 변환을 이미지 점 P 기준으로 dRad 회전. */
+    private fun applyAlignRotate(dRad: Double, px: Float, py: Float) {
+        theta += dRad
+        val dx = imgOx - px; val dy = imgOy - py
+        val c = cos(dRad).toFloat(); val s = sin(dRad).toFloat()
+        imgOx = px + dx * c - dy * s
+        imgOy = py + dx * s + dy * c
+    }
+
+    /** [P88e] ALIGN 모드 — 한 손가락=궤적 이동, 두 손가락=회전+크기+이동 (보정 절차 대체). */
+    private fun handleAlignTouch(e: MotionEvent): Boolean {
+        val f = fitParams()
+        val viewToImg = userScale * f.scale     // view px → image px 환산 분모
+        fun imgX(vx: Float) = ((vx - userTransX) / userScale - f.offX) / f.scale
+        fun imgY(vy: Float) = ((vy - userTransY) / userScale - f.offY) / f.scale
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                alignPrevX = e.x; alignPrevY = e.y; alignTwoFinger = false
+            }
+            MotionEvent.ACTION_POINTER_DOWN -> if (e.pointerCount == 2) {
+                alignTwoFinger = true
+                val dx = e.getX(1) - e.getX(0); val dy = e.getY(1) - e.getY(0)
+                alignPrevDist = hypot(dx.toDouble(), dy.toDouble()).toFloat()
+                alignPrevAng = atan2(dy.toDouble(), dx.toDouble()).toFloat()
+                alignPrevX = (e.getX(0) + e.getX(1)) / 2f
+                alignPrevY = (e.getY(0) + e.getY(1)) / 2f
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (e.pointerCount >= 2 && alignTwoFinger) {
+                    val dx = e.getX(1) - e.getX(0); val dy = e.getY(1) - e.getY(0)
+                    val dist = hypot(dx.toDouble(), dy.toDouble()).toFloat()
+                    val ang = atan2(dy.toDouble(), dx.toDouble()).toFloat()
+                    val mx = (e.getX(0) + e.getX(1)) / 2f
+                    val my = (e.getY(0) + e.getY(1)) / 2f
+                    val pIx = imgX(mx).toFloat(); val pIy = imgY(my).toFloat()
+                    if (alignPrevDist > 1f) {
+                        applyAlignScale(dist / alignPrevDist, pIx, pIy)
+                        applyAlignRotate((ang - alignPrevAng).toDouble(), pIx, pIy)
+                        imgOx += (mx - alignPrevX) / viewToImg
+                        imgOy += (my - alignPrevY) / viewToImg
+                    }
+                    alignPrevDist = dist; alignPrevAng = ang
+                    alignPrevX = mx; alignPrevY = my
+                    invalidate()
+                } else if (!alignTwoFinger) {
+                    imgOx += (e.x - alignPrevX) / viewToImg
+                    imgOy += (e.y - alignPrevY) / viewToImg
+                    alignPrevX = e.x; alignPrevY = e.y
+                    invalidate()
+                }
+            }
+            MotionEvent.ACTION_POINTER_UP -> if (e.pointerCount == 2) {
+                val idx = if (e.actionIndex == 0) 1 else 0
+                alignPrevX = e.getX(idx); alignPrevY = e.getY(idx)
+                alignTwoFinger = false
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> alignTwoFinger = false
+        }
+        return true
+    }
+
     // ── 탭/드래그/핀치 처리 ───────────────────────────────────────
     //   핀치(두 손가락)=확대, 드래그(한 손가락 이동)=이동, 탭(이동 없음)=모드별 탭.
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (mode == Mode.ALIGN) return handleAlignTouch(event)   // [P88e] 정렬 모드는 궤적 조작
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
         when (event.actionMasked) {
@@ -409,6 +503,7 @@ class FloorPlanView @JvmOverloads constructor(
                     when (mode) {
                         Mode.CALIBRATE -> handleCalibTap(ix, iy)
                         Mode.CHECKPOINT -> handleCheckpointTap(ix, iy)
+                        Mode.ALIGN -> { /* handleAlignTouch 에서 처리 (도달 안 함) */ }
                         Mode.NONE -> { /* 표시 전용 */ }
                     }
                 }

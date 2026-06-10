@@ -28,9 +28,10 @@
         android:id="@+id/action_load_floorplan"
         android:title="평면도 불러오기"
         app:showAsAction="never"/>
+    <!-- [P88e] 보정 절차 → 직접 정렬(드래그·핀치·회전)로 대체 -->
     <item
         android:id="@+id/action_calib_floorplan"
-        android:title="평면도 보정 (거리·방향)"
+        android:title="평면도 정렬 (드래그·핀치·회전)"
         app:showAsAction="never"/>
     <item
         android:id="@+id/action_toggle_checkpoint"

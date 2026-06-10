@@ -385,7 +385,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             // [P84] 평면도 오버레이
             R.id.action_toggle_floorplan -> { toggleFloorPlanView(item); true }
             R.id.action_load_floorplan -> { openFloorPlanLauncher.launch(arrayOf("image/*")); true }
-            R.id.action_calib_floorplan -> { startFloorPlanCalibration(); true }
+            R.id.action_calib_floorplan -> { toggleAlignFloorPlan(item); true }
             R.id.action_toggle_checkpoint -> { toggleCheckpointMode(item); true }
             R.id.action_export_checkpoint -> { exportCheckpoints(); true }
             R.id.action_export_marks -> { exportMarks(); true }
@@ -644,7 +644,33 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    /** 2점 보정 시작 — 평면도에서 시작·끝 위치를 차례로 탭하도록 모드 전환. */
+    // [P88e] 직접 정렬 모드 토글 — 보정 절차(거리/방향 탭) 대체.
+    //   ON: 한 손가락=궤적 이동, 두 손가락=회전/크기. OFF: 변환 영구 저장.
+    private var alignMode = false
+
+    private fun toggleAlignFloorPlan(item: MenuItem) {
+        if (!isFloorPlanMode) {
+            Toast.makeText(this, "먼저 평면도 모드로 전환하세요", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (!alignMode && viewModel.state.value.trackPoints.size < 2 && !binding.floorPlanView.isCalibrated()) {
+            Toast.makeText(this, "궤적이 없습니다 — 측위/Replay 후 정렬하세요", Toast.LENGTH_SHORT).show()
+            return
+        }
+        alignMode = !alignMode
+        if (alignMode) {
+            binding.floorPlanView.setMode(FloorPlanView.Mode.ALIGN)
+            item.title = "평면도 정렬 완료 (저장)"
+            Toast.makeText(this, "한 손가락=이동 · 두 손가락=회전/크기 — 끝나면 메뉴 '정렬 완료'", Toast.LENGTH_LONG).show()
+        } else {
+            binding.floorPlanView.setMode(FloorPlanView.Mode.NONE)
+            saveFloorPlanCalib()
+            item.title = "평면도 정렬 (드래그·핀치·회전)"
+            Toast.makeText(this, "정렬 저장됨 — 초기화/재시작 후에도 유지", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** [P88e 이후 미사용 — 구 2점 보정 진입점, 메뉴에서 분리됨] */
     private fun startFloorPlanCalibration() {
         if (!isFloorPlanMode) {
             Toast.makeText(this, "먼저 평면도 모드로 전환하세요", Toast.LENGTH_SHORT).show()
