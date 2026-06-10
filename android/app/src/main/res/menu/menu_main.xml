@@ -40,12 +40,10 @@
         android:id="@+id/action_export_checkpoint"
         android:title="체크포인트 내보내기"
         app:showAsAction="never"/>
-    <!-- [P79-1] Naver Map 관련 메뉴 임시 hide — 우선순위는 PC OxIOD 전처리 ablation.
-         재활성화는 두 항목의 android:visible="false" → "true" (또는 속성 제거). -->
+    <!-- [P79-1→P88] 지도 토글 재활성화 (작품 기본 화면). 전처리 OFF 궤적은 측정용이라 hide 유지. -->
     <item
         android:id="@+id/action_toggle_view"
         android:title="표시 모드: 격자 → 지도"
-        android:visible="false"
         app:showAsAction="never"/>
     <item
         android:id="@+id/action_toggle_ekf"

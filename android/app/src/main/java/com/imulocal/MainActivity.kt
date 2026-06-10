@@ -99,12 +99,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
 
     companion object {
-        // [P79-1] 네이버 지도 전체 비활성화 스위치 — 현재 우선순위는 PC OxIOD 전처리 ablation.
-        //   false: MapFragment getMapAsync 미호출 → 네이버 네트워크 호출/지도 init 0.
-        //          격자(TrackView) 단독 표시. 메뉴의 지도 토글 2개도 hide (menu_main.xml).
-        //   재활성화 (방향 확인 테스트 시): 본 값 true + menu_main.xml 의
-        //          action_toggle_view / action_toggle_ekf visible="true".
-        private const val MAP_ENABLED = false
+        // [P79-1→P88 재활성화] 네이버 지도 스위치.
+        //   true: MapFragment init + 메뉴 '표시 모드: 격자↔지도' 사용 가능 (작품 기본 화면).
+        //   지도 모드는 제품 화면 — GT 마크 버튼(P87, 측정용)은 지도 모드에서 숨김.
+        private const val MAP_ENABLED = true
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -418,10 +416,15 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             // [P68-5 fix] TrackView 를 INVISIBLE 로 → Map fragment(아래쪽 z-order)가 보임.
             //   GONE 사용 시 layout 재계산으로 map view 가 resize 되어 카메라 reset 가능.
             binding.trackView.visibility = View.INVISIBLE
+            // [P88] 평면도(측정용)와 상호 배타 — 지도 진입 시 평면도 숨김
+            binding.floorPlanView.visibility = View.INVISIBLE
+            isFloorPlanMode = false
             findViewById<View>(R.id.map)?.visibility = View.VISIBLE
             menuItem.title = "표시 모드: 지도 → 격자"
             // [P74] 슬라이더도 같이 보이게
             binding.replayControls.visibility = View.VISIBLE
+            // [P88] 지도 모드 = 제품 화면 — GT 마크 버튼(측정용) 숨김
+            binding.btnMark.visibility = View.GONE
             // 지도 모드로 전환 시 카메라 강제 재이동 (안전망)
             moveCameraToAnchor()
             // cursor 마커 즉시 갱신
@@ -433,6 +436,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             menuItem.title = "표시 모드: 격자 → 지도"
             // [P74] 격자 모드에서는 슬라이더 숨김 (지도 마커도 자동으로 안 보임)
             binding.replayControls.visibility = View.GONE
+            // [P88] 격자(측정) 모드 복귀 — 마크 버튼 다시 표시
+            binding.btnMark.visibility = View.VISIBLE
         }
     }
 
@@ -593,6 +598,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 Toast.makeText(this, "먼저 '평면도 불러오기'로 이미지를 선택하세요", Toast.LENGTH_LONG).show()
             }
             binding.trackView.visibility = View.INVISIBLE
+            // [P88] 지도(제품 화면)와 상호 배타 — 평면도(측정용) 진입 시 지도 숨김
+            findViewById<View>(R.id.map)?.visibility = View.INVISIBLE
+            binding.replayControls.visibility = View.GONE
+            isMapMode = false
+            binding.btnMark.visibility = View.VISIBLE   // 측정 모드 — 마크 버튼 표시
             binding.floorPlanView.visibility = View.VISIBLE
             menuItem.title = "표시 모드: 평면도 → 격자"
         } else {
