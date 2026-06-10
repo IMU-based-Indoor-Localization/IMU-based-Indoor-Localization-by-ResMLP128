@@ -9,6 +9,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.util.AttributeSet
+import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
@@ -73,17 +74,28 @@ class FloorPlanView @JvmOverloads constructor(
     private var userScale = 1f
     private var userTransX = 0f
     private var userTransY = 0f
+    // [P84-fix] 최소 줌 = 1.0(화면맞춤) — fit 이하 과축소로 가독성 떨어지는 문제 방지
     private val scaleDetector = ScaleGestureDetector(context,
         object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(d: ScaleGestureDetector): Boolean {
-                val newScale = (userScale * d.scaleFactor).coerceIn(0.5f, 12f)
+                val newScale = (userScale * d.scaleFactor).coerceIn(1f, 12f)
                 val applied = newScale / userScale
                 // 핀치 초점(focus) 아래 지점이 고정되도록 이동량 보정
                 userTransX = d.focusX - (d.focusX - userTransX) * applied
                 userTransY = d.focusY - (d.focusY - userTransY) * applied
                 userScale = newScale
+                clampUserTransform()
                 invalidate()
                 return true
+            }
+        })
+
+    // [P84-fix] 두 번 탭 = 화면맞춤 초기화 (표시 모드에서만 — 보정/체크포인트 탭과 충돌 방지)
+    private val gestureDetector = GestureDetector(context,
+        object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (mode == Mode.NONE) { resetView(); return true }
+                return false
             }
         })
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
@@ -91,8 +103,33 @@ class FloorPlanView @JvmOverloads constructor(
     private var lastTouchX = 0f; private var lastTouchY = 0f
     private var downTouchX = 0f; private var downTouchY = 0f
 
-    /** 확대/이동 초기화 (새 평면도 로드 시 호출). */
+    /** 확대/이동 초기화 (새 평면도 로드·두 번 탭 시 호출) — 화면맞춤 정렬로 복귀. */
     fun resetView() { userScale = 1f; userTransX = 0f; userTransY = 0f; invalidate() }
+
+    // [P84-fix] 화면 크기 변경(회전 등) 시 화면맞춤으로 재정렬
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        resetView()
+    }
+
+    /**
+     * [P84-fix] 사용자 변환 클램프 — 평면도가 화면 밖으로 사라져 정렬을 잃는 문제 방지.
+     * 스케일된 이미지가 화면보다 작은 축은 가운데 고정, 큰 축은 가장자리가 화면 안쪽으로
+     * 들어오지 못하게 제한(여백 금지).
+     */
+    private fun clampUserTransform() {
+        val f = fitParams()
+        val vw = width.toFloat(); val vh = height.toFloat()
+        if (vw <= 0f || vh <= 0f) return
+        val dw = f.dst.width() * userScale
+        val dh = f.dst.height() * userScale
+        var left = userTransX + userScale * f.dst.left
+        var top = userTransY + userScale * f.dst.top
+        left = if (dw <= vw) (vw - dw) / 2f else left.coerceIn(vw - dw, 0f)
+        top = if (dh <= vh) (vh - dh) / 2f else top.coerceIn(vh - dh, 0f)
+        userTransX = left - userScale * f.dst.left
+        userTransY = top - userScale * f.dst.top
+    }
 
     // ── 콜백 (Activity 가 다이얼로그/토스트 처리) ─────────────────
     /** ①스케일 2점 탭 완료 → Activity 가 실거리(m) 입력 다이얼로그 표시. 인자=두 점 픽셀거리. */
@@ -308,7 +345,7 @@ class FloorPlanView @JvmOverloads constructor(
                 else -> "보정 중"
             }
             Mode.CHECKPOINT -> "체크포인트 모드 — 랜드마크 지날 때 평면도를 탭 (누적 ${checkpoints.size})"
-            Mode.NONE -> if (!calibrated && bitmap != null) "표시 모드 — 보정하면 궤적이 평면도에 정렬됩니다" else ""
+            Mode.NONE -> if (!calibrated && bitmap != null) "표시 모드 — 핀치 확대 · 드래그 이동 · 두 번 탭 = 화면맞춤" else ""
         }
         if (msg.isEmpty()) return
         val pad = 16f
@@ -322,6 +359,7 @@ class FloorPlanView @JvmOverloads constructor(
     //   핀치(두 손가락)=확대, 드래그(한 손가락 이동)=이동, 탭(이동 없음)=모드별 탭.
     override fun onTouchEvent(event: MotionEvent): Boolean {
         scaleDetector.onTouchEvent(event)
+        gestureDetector.onTouchEvent(event)
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downTouchX = event.x; downTouchY = event.y
@@ -338,6 +376,7 @@ class FloorPlanView @JvmOverloads constructor(
                         userTransX += event.x - lastTouchX
                         userTransY += event.y - lastTouchY
                         lastTouchX = event.x; lastTouchY = event.y
+                        clampUserTransform()
                         invalidate()
                     }
                 }
