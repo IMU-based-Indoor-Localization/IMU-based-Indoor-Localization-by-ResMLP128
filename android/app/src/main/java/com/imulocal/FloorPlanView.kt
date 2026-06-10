@@ -225,6 +225,21 @@ class FloorPlanView @JvmOverloads constructor(
         invalidate()
     }
 
+    /** [P88c] 보정 파라미터 snapshot (영구 저장용) — [imgOx, imgOy, wOx, wOy, sPxPerM, theta]. 미보정 null. */
+    fun getCalibration(): DoubleArray? =
+        if (!calibrated) null
+        else doubleArrayOf(imgOx.toDouble(), imgOy.toDouble(), wOx, wOy, sPxPerM, theta)
+
+    /** [P88c] 저장된 보정 복원 — 앱 재시작/초기화 후에도 평면도 정렬 유지. */
+    fun setCalibration(c: DoubleArray) {
+        if (c.size < 6) return
+        imgOx = c[0].toFloat(); imgOy = c[1].toFloat()
+        wOx = c[2]; wOy = c[3]
+        sPxPerM = c[4]; theta = c[5]
+        calibrated = true
+        invalidate()
+    }
+
     /** image-px → world(m) 역변환. 미보정이면 null. */
     fun imageToWorld(ix: Float, iy: Float): Pair<Double, Double>? {
         if (!calibrated) return null

@@ -134,9 +134,10 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             viewModel.reset()
             // [P68-5] 두 view 모두 초기화 (어느 모드든 대응)
             binding.trackView.clearPath()
-            // [P84] 평면도 오버레이도 초기화 (궤적·체크포인트·보정 클리어)
+            // [P84] 평면도 오버레이 초기화 — 궤적·체크포인트만 클리어
             binding.floorPlanView.clearPath()
             binding.floorPlanView.setMode(FloorPlanView.Mode.NONE)
+            loadFloorPlanCalib()   // [P88c] 초기화 직후 보정 자동 복원 (안전망)
             checkpointMode = false
             gtMarks.clear()   // [P87] GT 마크 초기화
             pathPolyline.map = null
@@ -568,9 +569,11 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     /** 저장된 평면도 로드 + FloorPlanView 콜백 연결. onCreate 말미 1회 호출. */
     private fun setupFloorPlan() {
         loadFloorPlanFromDisk()
+        loadFloorPlanCalib()   // [P88c] 저장된 보정 복원 (앱 재시작에도 유지)
         binding.floorPlanView.onScalePointsReady = { showScaleDistanceDialog() }
         binding.floorPlanView.onCalibrationReady = {
-            Toast.makeText(this, "보정 완료 — 궤적이 평면도에 정렬됨", Toast.LENGTH_SHORT).show()
+            saveFloorPlanCalib()   // [P88c] 보정 완료 즉시 영구 저장
+            Toast.makeText(this, "보정 완료 — 궤적이 평면도에 정렬됨 (저장됨)", Toast.LENGTH_SHORT).show()
         }
         binding.floorPlanView.onCheckpointAdded = { idx ->
             Toast.makeText(this, "체크포인트 C${idx + 1} 기록", Toast.LENGTH_SHORT).show()
@@ -603,6 +606,20 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         } catch (e: Exception) {
             Toast.makeText(this, "평면도 불러오기 오류: ${e.message}", Toast.LENGTH_LONG).show()
         }
+    }
+
+    // [P88c] 평면도 보정 영구 저장/복원 — SharedPreferences("floorplan").
+    private fun saveFloorPlanCalib() {
+        val c = binding.floorPlanView.getCalibration() ?: return
+        getSharedPreferences("floorplan", MODE_PRIVATE).edit()
+            .putString("calib", c.joinToString(","))
+            .apply()
+    }
+
+    private fun loadFloorPlanCalib() {
+        val s = getSharedPreferences("floorplan", MODE_PRIVATE).getString("calib", null) ?: return
+        val c = s.split(",").mapNotNull { it.toDoubleOrNull() }.toDoubleArray()
+        if (c.size == 6) binding.floorPlanView.setCalibration(c)
     }
 
     /** 격자(TrackView) ↔ 평면도(FloorPlanView) 토글. 지도 모드와 독립. */
