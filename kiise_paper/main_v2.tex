@@ -369,7 +369,57 @@ yaw vs ga & 1.08$\times$ (1.02--1.13) & 94/152 & 소(유의) \\ \bottomrule
 \end{figure}
 
 \subsection{실측 Android 도메인 정성적 재현(case study)}
-배포 단말(Galaxy S23 FE) 실내 보행 3개 시퀀스에 대한 사례 검토다(정량 본체는 OxIOD 152 시퀀스). 모델 in-domain 스케일은 정확하며(OxIOD 7개 카테고리 ATE가 경로 길이의 약 1\%), 프레임만 바꾼 정렬 재현에서 ga$\approx$window-start($\le$0.95\,m)·body 발산(1.7--15.3\,m), 합성 yaw 드리프트 주입에서 크기 불변·방향 누적 yaw 비례 증가로 OxIOD 결과가 일관되게 재현되었다. 본 단말의 자이로-only heading은 자력계 융합이 없으면 20--33초에 72--113$^\circ$ 드리프트하여 RotVec 채택을 실측으로 정당화한다.
+배포 단말(Galaxy S23 FE) 실내 보행 3개 시퀀스에 대한 정성적 사례 검토(case study, N=3)이며, 정량 본체는 OxIOD 152 시퀀스다.
+
+\noindent\textbf{(a) 모델 in-domain 강건성.} OxIOD 7개 카테고리에서 dead-reckoning 경로 길이가 GT와 거의 일치하고 ATE가 경로 길이의 약 1\%로(표~\ref{tab:android-indomain}), Android에서 관측된 스케일 이탈은 모델이 아니라 학습--배포 도메인 시프트에서 비롯됨을 보인다.
+
+\begin{table*}[t]
+\caption{배포 모델의 OxIOD in-domain dead-reckoning ATE(경로 길이 약 1\%).}
+\label{tab:android-indomain}
+\centering\footnotesize
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+카테고리 & 시간 & DR 경로 & GT 경로 & ATE(m) & rel\% \\ \midrule
+handheld & 376s & 350\,m & 352\,m & 0.89 & 0.3\% \\
+pocket & 330s & 320\,m & 337\,m & 1.44 & 0.4\% \\
+slow walking & 611s & 442\,m & 461\,m & 1.48 & 0.3\% \\
+handbag & 574s & 526\,m & 523\,m & 3.02 & 0.6\% \\
+trolley & 447s & 320\,m & 295\,m & 3.00 & 1.0\% \\
+large scale & 153s & 167\,m & 176\,m & 3.00 & 1.7\% \\
+running & 691s & 968\,m & 941\,m & 4.60 & 0.5\% \\ \midrule
+평균 & --- & --- & --- & 2.49 & 약 1\% \\ \bottomrule
+\end{tabular}
+\end{table*}
+
+\noindent\textbf{(b) 전처리 정렬의 실측 재현.} 프레임만 ga/window-start/body로 바꿔 입력 전처리 효과만 격리하면, 3개 보행 모두 ga$\approx$window-start($\le$0.95\,m)이고 body는 발산(1.7--15.3\,m)하여 4.6절의 정렬 결과를 실측 도메인에서 재현한다(표~\ref{tab:android-align}).
+
+\begin{table}[t]
+\caption{실측 Android 정렬 재현: ga$\approx$window-start, body는 발산(N=3).}
+\label{tab:android-align}
+\centering\footnotesize
+\begin{tabular}{@{}lrr@{}}
+\toprule
+보행(경로) & ga $\leftrightarrow$ window-start & ga $\leftrightarrow$ body \\ \midrule
+A (9\,m) & 0.29\,m & 1.68\,m \\
+B (23\,m) & 0.95\,m & 10.63\,m \\
+C (30\,m) & 0.36\,m & 15.32\,m \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{(c) yaw 드리프트 민감도의 실측 재현.} 합성 yaw 드리프트를 실측 자세에 주입하면 변위 크기(경로 길이)는 불변하고 방향(끝점 편차)만 누적 yaw에 비례 증가하여 OxIOD와 일치한다(표~\ref{tab:android-yaw}). 본 단말의 자이로-only heading은 자력계 융합이 없으면 20--33초에 72--113$^\circ$ 드리프트하여 RotVec 채택을 실측으로 정당화한다.
+
+\begin{table}[t]
+\caption{실측 Android yaw 드리프트 재현: 크기 불변, 방향은 누적 yaw에 비례 증가(N=3, 누적 $\approx$165$^\circ$).}
+\label{tab:android-yaw}
+\centering\footnotesize
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+보행 & 시간·순변위 & 자이로 드리프트 & 크기 & 끝점편차 \\ \midrule
+A & 20s·5.3\,m & 77.7$^\circ$ (3.8$^\circ$/s) & 8.9\,m & 3.8\,m \\
+B & 33s·4.9\,m & 113.2$^\circ$ (3.4$^\circ$/s) & 22.9\,m & 14.2\,m \\
+C & 33s·17.9\,m & 72.5$^\circ$ (2.2$^\circ$/s) & 29.7\,m & 30.2\,m \\ \bottomrule
+\end{tabular}
+\end{table}
 
 % ==================================================================
 \section{논의}
