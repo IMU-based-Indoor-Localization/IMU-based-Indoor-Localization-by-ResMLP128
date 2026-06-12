@@ -1,0 +1,434 @@
+\documentclass{kcc}
+
+% 추가 패키지 (본문에서 사용)
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{dblfloatfix}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{cite}
+\graphicspath{{figures/}}
+
+% float 배치 완화: 그림이 언급 위치 가까이 배치되도록
+\setcounter{topnumber}{4}
+\setcounter{bottomnumber}{3}
+\setcounter{totalnumber}{6}
+\renewcommand{\topfraction}{0.95}
+\renewcommand{\bottomfraction}{0.6}
+\renewcommand{\textfraction}{0.05}
+\renewcommand{\floatpagefraction}{0.85}
+
+% set title, author, abstract
+\title{스마트폰 IMU 기반 실내 측위:\\ 적응형 EKF의 한계와 전처리 중심 해법}
+\author{
+［저자명］$^{\circ}$\\
+［소속/학과］ \\
+beoteu@gmail.com
+}
+\engtitle{Smartphone IMU-based Indoor Localization:\\ Limits of Adaptive EKF and a Preprocessing-Centric Solution}
+\engauthor{
+［Author Name］\\
+［Affiliation］\\
+}
+\abstract{
+GPS와 Wi-Fi·비콘 인프라가 소실되는 재난 환경의 실내 측위를 위해, 본 논문은 스마트폰 내장 IMU 센서만으로 보행자 위치를 추정하는 인프라 비의존 측위를 다룬다. 기존 TLIO·LLIO 계열의 학습 기반 관성 주행 측정법은 신경망이 예측한 변위·공분산을 Extended Kalman Filter(EKF)에 제공하되 측정 공분산을 단일 고정값으로 운용하여 휴대 상태별 신호 변화를 반영하지 못한다. 본 연구는 휴대 상태를 인식해 EKF 측정 공분산을 가변 조정하는 상태 기반 적응형 EKF를 설계·평가하고, Oxford Inertial Odometry Dataset(OxIOD) 전체 시퀀스에 대한 전처리 정렬 ablation과 합성 yaw 드리프트 민감도 분석을 수행하였다. 그 결과, 카테고리별 측정 공분산을 그리드 서치로 최적화하더라도 EKF 결합은 트롤리를 제외한 모든 휴대 상태에서 네트워크 단독(dead-reckoning)보다 열등하여, 격한 동작에서 2차원 위치 오차(RMSE)가 약 1.3--1.6\,m에서 4.7--7.8\,m로 3$\sim$5배 악화되었다. 반면 정답 변위를 측정값으로 직접 대입하면 트롤리 오차가 0.37\,m까지 회복되어, 병목이 EKF 구조가 아니라 입력 측정값 품질에 있음을 확인하였다. 나아가 중력 정렬을 생략하면 정확도가 2.44배 악화되고, 합성 yaw 드리프트는 변위 방향 예측만 선택적으로 7.7배 붕괴시키되 크기 예측은 1.0배로 보존함을 정량적으로 규명하였다. 이로써 측위 품질을 좌우하는 핵심이 필터의 측정 공분산 조정이 아니라 중력 정렬과 입력 좌표계의 yaw 안정성을 포함한 전처리의 정확성임을 실증하고, 전처리를 우선적 해결 방향으로 제시한다.\\[1.5mm]\\[1mm]
+\textbf{Keywords}: Inertial Odometry, Indoor Localization, Extended Kalman Filter, Gravity-Aligned Preprocessing, Out-of-Distribution
+}
+
+\begin{document}
+
+\maketitle
+
+\section{서론}
+% ==================================================================
+실내 보행자 위치 추정은 재난 대응에서 중요한 과제다. GPS는 실내에서 위성 신호가 차폐되어 측위가 어렵고, Wi-Fi·블루투스 비콘 등 인프라 기반 측위~\cite{radar}는 인프라가 정상 작동한다는 전제에 의존한다. 지진·화재 시 전력 차단과 통신 설비 손상으로 비콘 인프라가 소실되면 인프라 의존형 측위는 가장 필요한 순간에 기능을 상실한다. 농연으로 가득한 미지의 건물에 진입하는 소방대원의 경우, 외부 인프라 없이 단말이 자체적으로 위치를 추정하는 인프라 비의존(infrastructure-free) 측위가 유일한 수단이며, 가속도계·자이로스코프만 이용하는 관성 항법(IMU)이 유망한 대안이다.
+
+그러나 IMU 기반 측위는 센서 출력의 이중 적분 과정에서 바이어스·노이즈가 비선형적으로 증폭되어 누적 오차(drift)가 발산하는 한계가 있다. 전통적 보행자 추측 항법(PDR)~\cite{harle}은 이를 완화하나 보폭 모델 오차가 누적된다. 최근에는 IMU 신호로부터 운동 정보를 직접 학습하는 데이터 기반 접근~\cite{ionet}이 주류가 되었다.
+
+기존 학습형 관성 오도메트리(TLIO~\cite{tlio}, LLIO~\cite{llio})는 신경망이 예측한 변위·공분산을 EKF에 입력하되, 측정 노이즈 공분산 $\mathbf{R}$의 스케일을 학습 시점에 결정된 단일 고정값으로 운용한다. 이 고정 공분산은 휴대 상태(손에 쥠·주머니·가방·트롤리 등)에 따른 IMU 신호 특성 변화를 반영하지 못한다. 이에 착안하여 본 연구는 휴대 상태를 인식해 EKF 측정 공분산을 가변 조정하는 상태 기반 적응형 EKF(context-aware adaptive EKF)~\cite{akf}를 설계·평가하였다. 그러나 OxIOD에서 카테고리별 측정 공분산 스케일을 그리드 서치로 최적화한 결과, 트롤리를 제외한 모든 카테고리에서 EKF 결합이 네트워크 단독보다 열등하였으며 격한 동작에서 약 3$\sim$5배 악화되었다. 정답 변위를 EKF 측정값으로 직접 대입하는 진단 실험으로 EKF 구조 자체는 정상 동작하며 병목이 입력 측정값 품질에 있음을 확인하였다. 즉 EKF가 추정하는 yaw의 누적 드리프트로 신경망 입력 좌표계가 훈련 분포를 이탈(Out-of-Distribution, OOD)하면서 예측 신뢰성이 저하된다. 문제의 본질은 필터 파라미터 조정이 아니라 입력 전처리에 있다.
+
+
+\noindent\textbf{본 논문의 기여는 다음과 같다.}
+\begin{itemize}\setlength{\itemsep}{1pt}
+\item 휴대 상태별 최적 공분산을 부여해도 트롤리를 제외한 전 카테고리에서 EKF가 네트워크 단독보다 열등함을 OxIOD에서 정량 \textbf{규명}하여, 필터단 파라미터 적응의 한계를 드러낸다.
+\item 정답 변위 대입 실험으로 병목이 yaw 드리프트에 의한 입력 OOD(측정값 품질)임을 \textbf{진단}한다.
+\item OxIOD 152개 전 시퀀스 ablation으로 중력 정렬의 존재가 정확도를 지배하고(생략 시 2.44배 악화), yaw 드리프트가 변위 \emph{방향} 예측만 선택적으로 붕괴(7.7배)시키되 \emph{크기}는 보존하며, 이 해리가 ResNet1D 백본에서도 재현되는 백본 독립적 성질임을 \textbf{확증}한다.
+\item 방향 불변 전처리가 측위 품질의 핵심 요인임을 밝히고, 전처리가 가변 파라미터 EKF를 대체하는 우선적 해결 방향임을 \textbf{제시}한다.
+\end{itemize}
+
+
+% ==================================================================
+\section{관련 연구}
+% ==================================================================
+\textbf{RONIN}~\cite{ronin}은 단말 자세로 IMU를 중력 기준 안정화 좌표계(heading-agnostic frame)로 변환하는 방향 불변 전처리를 도입해, 학습 이전 단계의 입력 전처리가 측위 정확도에 직접 기여함을 보였다. 다만 추정 속도를 적분하는 회귀 전용 구조여서 예측 불확실성을 명시적으로 다루지 못한다. \textbf{TLIO}~\cite{tlio}는 약 1초 윈도우 IMU를 중력 정렬 프레임으로 변환한 뒤 1D-ResNet으로 변위 $\Delta\mathbf{p}$와 공분산 $\Sigma$를 예측해 EKF 측정 갱신에 입력하는 긴밀 결합 구조를 제안했다. \textbf{LLIO}~\cite{llio}는 합성곱 대신 행렬 곱 기반 경량 ResMLP~\cite{resmlp}를 채택해 스마트폰급 환경의 실시간 추론을 달성했다. 세 연구 모두 절대 yaw 기준이 안정적으로 성립하는 환경을 전제하여 중력 정렬을 단일 요소로 취급하며, yaw 기준이 부재한 스마트폰 환경에서 입력 좌표계 정렬이 무너지는 상황을 충분히 다루지 않는다. 적응형 칼만 필터~\cite{akf} 계열은 필터단 파라미터 적응으로 강건성을 추구하나, 본 연구는 해결 지점을 필터가 아니라 입력 전처리로 이동시킨다는 점에서 차별화된다.
+
+% ==================================================================
+\section{제안 방법}
+% ==================================================================
+\subsection{시스템 설계}
+제안 시스템은 (1) 원시 IMU를 신경망 입력 분포에 정합시키는 전처리, (2) 변위·불확실성·휴대 상태를 동시 예측하는 1D-ResMLP128 다중 헤드 신경망, (3) 출력을 누적해 궤적을 산출하는 상태 추정기로 구성된다(그림~\ref{fig:pipeline}). 학습은 OxIOD(iPhone)~\cite{oxiod} 기반이며 추론은 PyTorch Mobile로 변환된 모델이 단말에서 실행한다. iPhone 학습 모델과 Android 배포 단말의 센서 도메인 차이로 EKF 경로가 발산하는 현상이 관측되어, 단말 기본 동작은 RotVec 기반 dead-reckoning 경로로 운용된다. 구현된 온디바이스 앱은 단말에서 실시간으로 측위 궤적을 표시하며, 윈도우당 추론 지연은 약 13\,ms로 100\,Hz 입력에 대해 실시간으로 동작한다(그림~\ref{fig:app}).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\columnwidth]{fig1_pipeline.png}
+\caption{시스템 파이프라인 블록도: 전처리 $\to$ 1D-ResMLP128 백본 $\to$ 다중 헤드 $\to$ 상태 추정기.}
+\label{fig:pipeline}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.88\columnwidth]{fig_app.png}
+\caption{온디바이스 앱 구현 화면 --- (a) 실시간 측위 궤적·위치·속도와 추론 지연 약 13\,ms, (b) 미래관 3층 평면도 오버레이(실측 보행 수집 현장; 일부 실명 블러 처리).}
+\label{fig:app}
+\end{figure}
+
+\subsection{데이터셋 및 데이터 증강}
+주 데이터셋은 OxIOD~\cite{oxiod}(iPhone)로 Handbag, Handheld, Pocket, Running, Slow Walking, Trolley의 6개 휴대 상태 레이블을 포함한다. 보조로 TLIO golden(283 시퀀스, 약 908{,}149 샘플)을 추가해 클래스 불균형을 완화한다. 입력은 1초(100 샘플) 윈도우를 stride 10으로 생성한 6채널(가속도 3 + 자이로 3) 신호다. 학습 시 표~\ref{tab:aug}의 세 증강을 적용한다. 특히 Yaw Rotation 증강은 매 윈도우를 일관된 단일 yaw로 회전시켜 윈도우 내부 정렬을 보존하므로, 윈도우 시작 yaw가 누적 이탈해 per-sample 정렬이 어긋나는 yaw 드리프트(4.6절)와는 다른 변형이며, 따라서 누적 드리프트에 의한 입력 OOD를 면역시키지 못한다.
+
+\begin{table}[!htb]
+\caption{학습 데이터 증강 기법.}
+\label{tab:aug}
+\centering\footnotesize
+\begin{tabular}{@{}p{0.30\columnwidth}p{0.60\columnwidth}@{}}
+\toprule
+증강 기법 & 내용 \\ \midrule
+Bias Noise & 가속도 $\pm0.2$\,m/s$^2$, 자이로 $\pm0.05$\,rad/s 랜덤 바이어스 \\
+Gravity Pert. & 중력 방향 $\pm5^\circ$ 수평 랜덤 기울임 \\
+Yaw Rotation & 매 윈도우 랜덤 yaw 회전(방향 불변성 강화) \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{전처리}
+전처리는 바이어스 영점 보정, 중력 정렬 좌표 변환, 채널별 정규화로 구성된다. (1) 시작 약 2초 정지 구간에서 평균을 바이어스로 추정해 차감한다.
+\begin{equation}
+\mathbf{b}_a=\frac{1}{N_c}\sum_{t=1}^{N_c}\mathbf{a}^{lin}_t,\quad
+\mathbf{b}_\omega=\frac{1}{N_c}\sum_{t=1}^{N_c}\bm{\omega}_t
+\end{equation}
+여기서 $N_c$는 정지 구간 샘플 수(약 2초$\times$100\,Hz)이다. (2) 각 시각 자세 쿼터니언 $\mathbf{q}_t$로 body$\to$world 회전 $\mathbf{R}(\mathbf{q}_t)$를 적용한 뒤 윈도우 시작 yaw 성분 $\psi_0$만 제거한다.
+\begin{equation}
+\mathbf{a}^{ga}_t=\mathbf{R}_z(\psi_0)^{-1}\mathbf{R}(\mathbf{q}_t)\mathbf{a}_t,\quad
+\bm{\omega}^{ga}_t=\mathbf{R}_z(\psi_0)^{-1}\mathbf{R}(\mathbf{q}_t)\bm{\omega}_t
+\end{equation}
+여기서 $\psi_0$는 $\mathbf{q}_s$의 ZYX 오일러 yaw 성분, $\mathbf{R}_z(\psi_0)$는 그 yaw에 대한 $z$축 회전이다. 이는 단말 기울기에 무관한 표현과 절대 방위 불변(heading-agnostic) 입력을 동시에 제공한다. 4.6절 ablation에 따르면 시간적 입도(per-timestep 대 윈도우 시작 단일 회전)는 작지만 유의한 개선(기하평균 1.08배)을 주며, 품질을 지배하는 것은 중력 정렬의 존재(생략 시 2.44배 악화)와 입력 좌표계의 절대 yaw 안정성이다. (3) 채널별 표준화.
+\begin{equation}
+\tilde{\mathbf{u}}_t=(\mathbf{u}_t-\bm{\mu}_{norm})\oslash\bm{\sigma}_{norm}
+\end{equation}
+$\mathbf{u}_t=[\mathbf{a}^{ga}_t;\bm{\omega}^{ga}_t]\in\mathbb{R}^6$, $\oslash$는 원소별 나눗셈이다.
+
+\subsection{회귀 헤드: 변위·불확실성}
+공유 백본의 평균 풀링 특징 $\mathbf{h}\in\mathbb{R}^{128}$로부터 변위 평균 $\bm{\mu}\in\mathbb{R}^3$과 대각 로그 분산 $\log\bm{\sigma}^2$를 산출하고, 공분산을 복원한다.
+\begin{equation}
+\bm{\Sigma}=\mathrm{diag}\!\left(\exp(\log\bm{\sigma}^2)\right)
+\end{equation}
+초기 30 epoch는 MSE로 안정화한 뒤 가우시안 NLL로 전환한다.
+\begin{align}
+L_{MSE}&=\frac{1}{N}\sum_{i=1}^{N}\lVert\mathbf{y}_i-\bm{\mu}_i\rVert^2\\
+L_{NLL}&=\frac{1}{2}\sum_i\!\left[\exp(-\log\sigma_i^2)(y_i-\mu_i)^2+\log\sigma_i^2\right]
+\end{align}
+여기서 $y_i,\mu_i,\sigma_i^2$는 각각 정답·예측 변위와 예측 분산의 성분이다. $\log\sigma^2$는 $[-2,2]$로 클램핑한다.
+
+\subsection{분류 헤드: 휴대 상태}
+\begin{equation}
+\mathbf{p}=\mathrm{softmax}(f_{cls}(\mathbf{h})),\quad \mathbf{p}\in\mathbb{R}^{K}
+\end{equation}
+$K=7$(6개 휴대 상태 + unknown). 클래스 불균형 보정을 위해 역제곱근 가중치와 label smoothing을 쓴다.
+\begin{equation}
+w_c\propto\frac{1}{\sqrt{n_c}},\quad L_{cls}=-\sum_{c=1}^{K}w_c\,y_c\log p_c
+\end{equation}
+배포 변위 모델은 순수 회귀(\texttt{use\_classifier=false})로 운용되며 분류 헤드는 별도 학습한 독립 분류기다.
+
+\subsection{상태 추정기: SC-EKF}
+상태 추정기는 확률적 클로닝 EKF~\cite{kalman,stochcloning}로 15차원 오차 상태와 윈도우 경계 클론을 함께 추정한다. 시작·끝 클론 위치 $\mathbf{p}_b,\mathbf{p}_e$와 시작 yaw 회전으로부터 예측 측정값은
+\begin{equation}
+\hat{\mathbf{z}}=\mathbf{R}_z(\psi_b)^{\top}(\mathbf{p}_e-\mathbf{p}_b)
+\end{equation}
+측정 노이즈 공분산은 예측 공분산에 스케일 $s$를 곱한다.
+\begin{equation}
+\mathbf{R}=s\cdot\bm{\Sigma},\quad s=\texttt{meascov\_scale}
+\end{equation}
+잔차 $\mathbf{r}=\mathbf{z}-\hat{\mathbf{z}}$와 야코비안 $\mathbf{H}$로부터 갱신을 수행한다.
+\begin{equation}
+\mathbf{S}=\mathbf{H}\bm{\Sigma}\mathbf{H}^{\top}+\mathbf{R},\;\;
+\mathbf{K}=\bm{\Sigma}\mathbf{H}^{\top}\mathbf{S}^{-1},\;\;
+\delta\mathbf{x}=\mathbf{K}\mathbf{r}
+\end{equation}
+공분산은 수치 안정성을 위해 Joseph 형식으로 갱신한다.
+\begin{equation}
+\bm{\Sigma}^{+}=(\mathbf{I}-\mathbf{K}\mathbf{H})\bm{\Sigma}(\mathbf{I}-\mathbf{K}\mathbf{H})^{\top}+\mathbf{K}\mathbf{R}\mathbf{K}^{\top}
+\end{equation}
+서론의 가변 파라미터 접근은 바로 $s$를 휴대 상태에 따라 조정하려는 시도였다.
+
+\subsection{학습 설정}
+하이퍼파라미터는 표~\ref{tab:hyper}와 같다. 학습은 단일 NVIDIA GeForce RTX 4070 Ti GPU에서 Anaconda 기반 PyTorch 2.7.1(CUDA 11.8)로 수행하였고, 학습된 모델은 PyTorch Mobile로 변환되어 단말 CPU에서 추론된다.
+
+\begin{table}[!htb]
+\caption{학습 하이퍼파라미터(\texttt{config.json} 기준).}
+\label{tab:hyper}
+\centering\footnotesize
+\begin{tabular}{@{}p{0.34\columnwidth}p{0.56\columnwidth}@{}}
+\toprule
+항목 & 설정값 \\ \midrule
+옵티마이저 & AdamW~\cite{adamw} (lr 1e-4, wd 1e-4) \\
+스케줄 & CosineAnnealing ($T_{max}{=}100$), warmup 5 \\
+배치 / epoch & 128 / 100 (early stop 30) \\
+Grad clip & max-norm 1.0 \\
+손실 전환 & 30 epoch MSE $\to$ Gaussian NLL \\
+윈도우 / stride & 100 샘플(1초) / 10 샘플 \\ \bottomrule
+\end{tabular}
+\end{table}
+
+% ==================================================================
+\section{실험}
+% ==================================================================
+\subsection{실험 설정}
+평가는 OxIOD(train 122 / val 15 / test 15)와 TLIO golden으로 학습한 모델을 대상으로 한다. 정확도는 비겹침(stride=100) 앵커 위치의 2차원 오차 RMSE로 측정한다.
+\begin{equation}
+\mathrm{RMSE}_{XY}=\sqrt{\frac{1}{N}\sum_{k=1}^{N}\lVert\hat{\mathbf{p}}^{(k)}_{xy}-\mathbf{p}^{(k)}_{xy,\mathrm{GT}}\rVert^2}
+\end{equation}
+EKF는 카테고리별로 \texttt{meascov\_scale}을 $[0.001,\ldots,10.0]$에서 그리드 서치한다. 이 그리드 서치는 평가 시퀀스의 오차를 직접 최소화하는 사후(oracle) 최적화로 EKF에 유리한 관대한 상한이며, 그럼에도 후술하듯 트롤리를 제외한 전 카테고리에서 네트워크 단독에 열등하다. 측위 평가는 카테고리당 가장 긴 시퀀스 1개로 수행한다.
+
+\subsection{변위 회귀 성능}
+공정 비교를 위해 ResMLP128과 파라미터를 맞춘 ResNet1D-Small, 약 10배 큰 ResNet1D-Full을 함께 학습했다(표~\ref{tab:backbone}). 약 460K 조건에서 ResMLP128이 ResNet1D-Small보다 Test RMSE 0.021\,m 우수하며, 10배 큰 Full과의 차이도 0.014\,m에 불과하다(그림~\ref{fig:backbone}).
+
+\begin{table}[!htb]
+\caption{변위 회귀 백본의 파라미터 수 대비 Test RMSE.}
+\label{tab:backbone}
+\centering\footnotesize
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+모델 & 파라미터 & Val RMSE(m) & Test RMSE(m) \\ \midrule
+ResMLP128 & 459{,}870 & 0.1694 & 0.1381 \\
+ResNet1D-Small & 460{,}490 & 0.1875 & 0.1588 \\
+ResNet1D-Full & 5{,}031{,}430 & 0.1584 & 0.1239 \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\columnwidth]{fig2_backbone.png}
+\caption{Handbag 시퀀스 세 모델 예측 경로 비교(좌: X--Y, 우: Z 누적). ResMLP128 1.250\,m로 최저 오차.}
+\label{fig:backbone}
+\end{figure}
+
+\subsection{휴대 상태 분류 성능}
+독립 분류기 기준 정확도는 98.68\%이며 Handbag--Pocket 오분류는 약 0.3\%로 억제되었다(표~\ref{tab:cls}).
+
+\begin{table}[!htb]
+\caption{휴대 상태 분류 성능(독립 분류기).}
+\label{tab:cls}
+\centering\footnotesize
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+클래스 & Prec. & Rec. & F1 & Support \\ \midrule
+Trolley & 1.000 & 0.999 & 0.999 & 895 \\
+Handbag & 0.999 & 0.993 & 0.996 & 2{,}289 \\
+Handheld & 0.941 & 0.993 & 0.966 & 752 \\
+Pocket & 0.975 & 0.992 & 0.984 & 661 \\
+Running & 1.000 & 0.970 & 0.985 & 1{,}382 \\
+Slow Walking & 0.976 & 0.979 & 0.978 & 1{,}223 \\
+\midrule
+Weighted Avg & 0.987 & 0.987 & 0.987 & 7{,}202 \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{EKF 결합 대 네트워크 단독}
+표~\ref{tab:ekf}에서 트롤리를 제외한 모든 카테고리에서 EKF가 네트워크 단독보다 열등하며, 격한 동작(handheld·running·pocket)에서 3$\sim$5배, 장거리에서 8배 이상 악화된다(그림~\ref{fig:bar}). 대표 Handheld 시퀀스 30초 궤적은 그림~\ref{fig:traj}와 같다.
+
+\begin{table*}[t]
+\caption{카테고리별 EKF 결합 대 네트워크 단독 $\mathrm{RMSE}_{XY}$ 비교.}
+\label{tab:ekf}
+\centering\footnotesize
+\begin{tabular}{@{}lrrrl@{}}
+\toprule
+Category & Best Scale & Net-only(m) & EKF(m) & 결과 \\ \midrule
+trolley & 0.001 & 1.9764 & 1.6424 & EKF 우위 ($+17\%$) \\
+handbag & 0.001 & 1.2018 & 3.0852 & EKF 열등 (2.6$\times$) \\
+handheld & 0.001 & 1.5706 & 7.7783 & EKF 열등 (5.0$\times$) \\
+pocket & 0.001 & 1.3682 & 4.8744 & EKF 열등 (3.6$\times$) \\
+running & 0.01 & 1.3139 & 4.6835 & EKF 열등 (3.6$\times$) \\
+slow\_walking & 1.0 & 1.3399 & 3.8677 & EKF 열등 (2.9$\times$) \\
+large\_scale & 0.1 & 2.3559 & 19.3046 & EKF 열등 (8.2$\times$) \\ \bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\columnwidth]{fig_headline_bar.png}
+\caption{카테고리별 네트워크 단독 vs EKF 결합 측위 오차(RMSE, 로그축). trolley만 EKF 우위(+17\%)이고 나머지는 2.6--8.2배 악화.}
+\label{fig:bar}
+\end{figure}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=0.9\columnwidth]{fig4_handheld.png}
+\caption{Handheld 대표 시퀀스 30초 GT·Net·EKF 궤적(Net 0.230$\to$EKF 2.802\,m). 전체 시퀀스에서도 EKF 오차가 네트워크의 5.0배(표~\ref{tab:ekf}).}
+\label{fig:traj}
+\end{figure}
+
+\subsection{근본 원인 진단: 정답 변위 대체}
+신경망 예측 대신 정답(GT) 변위를 EKF에 직접 대입하면 트롤리가 0.37\,m로 회복되어, 병목이 필터가 아니라 입력 측정값 품질임을 입증한다(표~\ref{tab:gtmeas}). running은 빠른 회전의 큰 yaw 드리프트로 GT 변위마저 잘못된 프레임으로 변환되어 악화된다.
+
+\begin{table}[!htb]
+\caption{정답 변위 대체 실험($\mathrm{RMSE}_{XY}$, m).}
+\label{tab:gtmeas}
+\centering\footnotesize
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Category & Net & EKF best & GT-Meas EKF \\ \midrule
+trolley & 1.98 & 1.64 & 0.37 \\
+handheld & 1.57 & 7.78 & 4.22 \\
+pocket & 1.37 & 4.87 & 2.42 \\
+running & 1.31 & 4.68 & 6.75 \\
+large\_scale & 2.36 & 19.30 & 11.64 \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{전처리 정렬 ablation 및 yaw 드리프트 민감도}
+모든 수치는 OxIOD에서 배포 모델로 산출했고 baseline 윈도우 오차 0.148\,m는 Test RMSE 0.138\,m와 정합한다.
+
+\noindent\textbf{(a) 입력 정렬 ablation.} 중력 정렬을 세 수준(ga / yaw / body)으로 분해한다. 전체 152개 시퀀스 paired 비교(표~\ref{tab:align})에서 회전 정렬 생략(body)은 ATE를 2.44배 악화시키나, 시간적 입도 차이(yaw vs ga)는 1.08배로 작다(그림~\ref{fig:align}).
+
+\begin{table}[!htb]
+\caption{입력 전처리 정렬 ablation(OxIOD 152 시퀀스 pooled).}
+\label{tab:align}
+\centering\footnotesize
+\begin{tabular}{@{}lccc@{}}
+\toprule
+비교 & 기하평균(95\% CI) & OFF 악화 & 효과 \\ \midrule
+body vs ga & 2.44$\times$ (2.08--2.86) & 124/152 & 대 \\
+yaw vs ga & 1.08$\times$ (1.02--1.13) & 94/152 & 소(유의) \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\columnwidth]{fig6_align.png}
+\caption{정렬 ablation dead-reckoning 궤적(large\_scale). body(정렬 OFF)는 크게 발산(ATE 54.3\,m), ga(2.44\,m)·yaw(2.54\,m)는 GT 근접 추종.}
+\label{fig:align}
+\end{figure}
+
+\noindent\textbf{(b) yaw 드리프트 민감도.} 정답 자세에 등속 yaw 드리프트 $\mathbf{q}_{drift}(t)=\mathbf{R}_z(\omega t)\otimes\mathbf{q}_{true}(t)$를 주입한다. 예측 저하를 회전 불변량인 크기 오차와 방향 오차로 분해하면(표~\ref{tab:decomp}), 크기 예측은 보존(1.00배)되나 방향 예측만 7.7배 붕괴한다 — 단순 프레임 회전이 아닌 진정한 OOD다(그림~\ref{fig:sens}). 누적량이 본질적이어서 누적 yaw 약 10$^\circ$만으로도 1.5배에 도달한다(표~\ref{tab:onset}). 이 방향 붕괴는 드리프트가 커질수록 궤적이 GT에서 이탈하는 형태로 나타난다(그림~\ref{fig:drifttraj}). 또한 이 해리는 전체 152개 시퀀스와 구조가 다른 ResNet1D 백본(460K·5.0M)에서도 방향 7.2$\sim$7.7배 붕괴·크기 보존으로 재현되어 백본·시퀀스 선택에 무관한 일반 속성이다.
+
+\begin{table}[!htb]
+\caption{yaw 드리프트의 방향/크기 분해(input\_only).}
+\label{tab:decomp}
+\centering\footnotesize
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+드리프트(°/s) & 방향오차(m) & 크기오차(m) & 출력경로(m) \\ \midrule
+0.0 & 0.148 & 0.096 & 0.148 \\
+0.5 & 1.155 & 0.095 & 0.148 \\
+5.0 & 1.140 & 0.096 & 0.148 \\
+0$\to$5 배수 & 7.70$\times$ & 1.00$\times$ & 1.00$\times$ \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[!htb]
+\caption{누적 yaw에 따른 윈도우 예측오차(onset).}
+\label{tab:onset}
+\centering\footnotesize
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+드리프트(°/s) & 누적 yaw(°) & 윈도우오차(m) & baseline 대비 \\ \midrule
+0.00 & 0 & 0.148 & 1.00$\times$ \\
+0.02 & 11 & 0.220 & 1.49$\times$ \\
+0.05 & 28 & 0.339 & 2.29$\times$ \\
+0.20 & 110 & 0.586 & 3.96$\times$ \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\columnwidth]{fig7_sensitivity.png}
+\caption{합성 yaw 드리프트 민감도(input\_only, 8 카테고리 평균). (a) 방향만 7.70$\times$ 붕괴, 크기 1.00$\times$ 보존. (b) 누적 yaw onset, $\sim$10$^\circ$가 입력 OOD 회피 기준.}
+\label{fig:sens}
+\end{figure}
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\columnwidth]{fig8_drifttraj.png}
+\caption{입력 yaw 드리프트 궤적(large\_scale\_14). 0.1·0.3°/s(누적 12°·35°)로 갈수록 GT에서 이탈(ATE 1.7$\to$3.6$\to$7.6\,m).}
+\label{fig:drifttraj}
+\end{figure}
+
+\noindent\textbf{(c) 절대 yaw 기준(RotVec)의 positive 검증.} SC-EKF의 추정 yaw는 절대 기준이 없어 말기 평균 약 135$^\circ$(최대 222$^\circ$)까지 불규칙 드리프트하여 $\sim$10$^\circ$ 예산을 크게 초과하고, ATE가 RotVec-DR 대비 5.0배 악화된다(EKF 7.78\,m 대 1.57\,m). 절대 yaw 기준을 공급하면 입력 좌표계가 예산 내에 유지되어 Net-only 수준을 회복한다(그림~\ref{fig:ekfvs}).
+
+\begin{figure}[!htb]
+\centering
+\includegraphics[width=\columnwidth]{fig9_ekfvsrotvec.png}
+\caption{실제 EKF yaw 드리프트 vs RotVec 절대 yaw(handheld\_1). (a) EKF는 초기부터 발산, RotVec-DR은 GT 추종. (b) EKF yaw가 $\pm10^\circ$ 예산을 크게 벗어나 불규칙 드리프트.}
+\label{fig:ekfvs}
+\end{figure}
+
+\subsection{실측 Android 도메인 정성적 재현(case study)}
+배포 단말(Galaxy S23 FE) 실내 보행 3개 시퀀스에 대한 정성적 사례 검토(case study, N=3)이며, 정량 본체는 OxIOD 152 시퀀스다.
+
+\noindent\textbf{(a) 모델 in-domain 강건성.} OxIOD 7개 카테고리에서 dead-reckoning 경로 길이가 GT와 거의 일치하고 ATE가 경로 길이의 약 1\%로(표~\ref{tab:android-indomain}), Android에서 관측된 스케일 이탈은 모델이 아니라 학습--배포 도메인 시프트에서 비롯됨을 보인다.
+
+\begin{table*}[t]
+\caption{배포 모델의 OxIOD in-domain dead-reckoning ATE(경로 길이 약 1\%).}
+\label{tab:android-indomain}
+\centering\footnotesize
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+카테고리 & 시간 & DR 경로 & GT 경로 & ATE(m) & rel\% \\ \midrule
+handheld & 376s & 350\,m & 352\,m & 0.89 & 0.3\% \\
+pocket & 330s & 320\,m & 337\,m & 1.44 & 0.4\% \\
+slow walking & 611s & 442\,m & 461\,m & 1.48 & 0.3\% \\
+handbag & 574s & 526\,m & 523\,m & 3.02 & 0.6\% \\
+trolley & 447s & 320\,m & 295\,m & 3.00 & 1.0\% \\
+large scale & 153s & 167\,m & 176\,m & 3.00 & 1.7\% \\
+running & 691s & 968\,m & 941\,m & 4.60 & 0.5\% \\ \midrule
+평균 & --- & --- & --- & 2.49 & 약 1\% \\ \bottomrule
+\end{tabular}
+\end{table*}
+
+\noindent\textbf{(b) 전처리 정렬의 실측 재현.} 프레임만 ga/window-start/body로 바꿔 입력 전처리 효과만 격리하면, 3개 보행 모두 ga$\approx$window-start($\le$0.95\,m)이고 body는 발산(1.7--15.3\,m)하여 4.6절의 정렬 결과를 실측 도메인에서 재현한다(표~\ref{tab:android-align}).
+
+\begin{table}[!htb]
+\caption{실측 Android 정렬 재현: ga$\approx$window-start, body는 발산(N=3).}
+\label{tab:android-align}
+\centering\footnotesize
+\begin{tabular}{@{}lrr@{}}
+\toprule
+보행(경로) & ga $\leftrightarrow$ window-start & ga $\leftrightarrow$ body \\ \midrule
+A (9\,m) & 0.29\,m & 1.68\,m \\
+B (23\,m) & 0.95\,m & 10.63\,m \\
+C (30\,m) & 0.36\,m & 15.32\,m \\ \bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{(c) yaw 드리프트 민감도의 실측 재현.} 합성 yaw 드리프트를 실측 자세에 주입하면 변위 크기(경로 길이)는 불변하고 방향(끝점 편차)만 누적 yaw에 비례 증가하여 OxIOD와 일치한다(표~\ref{tab:android-yaw}). 본 단말의 자이로-only heading은 자력계 융합이 없으면 20--33초에 72--113$^\circ$ 드리프트하여 RotVec 채택을 실측으로 정당화한다.
+
+\begin{table}[!htb]
+\caption{실측 Android yaw 드리프트 재현: 크기 불변, 방향은 누적 yaw에 비례 증가(N=3, 누적 $\approx$165$^\circ$).}
+\label{tab:android-yaw}
+\centering\footnotesize
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+보행 & 시간·순변위 & 자이로 드리프트 & 크기 & 끝점편차 \\ \midrule
+A & 20s·5.3\,m & 77.7$^\circ$ (3.8$^\circ$/s) & 8.9\,m & 3.8\,m \\
+B & 33s·4.9\,m & 113.2$^\circ$ (3.4$^\circ$/s) & 22.9\,m & 14.2\,m \\
+C & 33s·17.9\,m & 72.5$^\circ$ (2.2$^\circ$/s) & 29.7\,m & 30.2\,m \\ \bottomrule
+\end{tabular}
+\end{table}
+
+% ==================================================================
+\section{논의}
+% ==================================================================
+정답 변위 대입(트롤리 0.37\,m)은 EKF 구조가 정상 동작함을, 병목이 입력 측정값 품질임을 입증한다. 학습 시 입력은 정답 yaw 프레임이나 EKF 운용 시 추정 yaw로 정규화되므로, yaw가 정답에서 벗어나면 입력이 OOD가 되어 예측 품질이 저하된다. 합성 드리프트의 입력·출력 경로 분리에서 \emph{방향}만 7.7배 붕괴하고 \emph{크기}는 보존된다는 사실은 이것이 좌표 변환 잔차가 아닌 진정한 OOD임을 보인다. 따라서 측위 품질을 좌우하는 핵심은 필터 파라미터가 아니라 입력 프레임 정렬의 정확성이다.
+
+본 연구의 한계는 다음과 같다. 첫째, 측위 평가가 카테고리당 최장 시퀀스 1개로 수행되어 시퀀스 선택 편향이 있다. 둘째, 정렬 ablation 일차 결과는 선행연구의 재확인으로 평가 하니스 검증·대조군이다. 셋째, 실측 Android 재현은 N=3·단일 기기·단일 자세(handheld)·상대(RotVec) 기준의 소규모 사례 검토로, 절대 위치 GT 기반 검증은 향후 과제다. 또한 누적 약 10$^\circ$ 임계는 등속 합성 드리프트·본 모델 기준의 경험값으로 order-of-magnitude 설계 기준으로 봄이 적절하다. 한편 EKF 열등은 (a) EKF 동역학 오버헤드와 (b) yaw 드리프트 측정 OOD로 분해되며, 느린 보행은 yaw가 안정적임에도 (a) 오버헤드로 열등한 반면 고회전 상태에서는 (b)가 지배적이다.
+
+% ==================================================================
+\section{결론}
+% ==================================================================
+본 논문은 휴대 상태 인식 기반 적응형 EKF를 설계·평가하였으나, OxIOD에서 카테고리별 공분산을 최적화해도 트롤리를 제외한 전 휴대 상태에서 EKF가 네트워크 단독보다 열등하고 격한 동작에서 3$\sim$5배 악화됨을 확인하였다. 정답 변위 대입 진단(트롤리 0.37\,m)은 병목이 필터가 아니라 입력 측정값 품질, 그 근본 원인이 절대 yaw 부재에서 누적되는 드리프트에 의한 입력 OOD임을 입증하였다. 나아가 전 시퀀스 ablation으로 중력 정렬의 존재(생략 시 2.44배 악화)와 입력 yaw 안정성이 측위 품질을 지배하며 yaw 드리프트가 변위 방향 예측만 7.7배 선택적으로 붕괴시킴을 정량 확증하였다. 이로써 핵심이 측정 공분산 조정이 아니라 입력 전처리의 정확성임을 규명하고, 누적 yaw 약 10$^\circ$ 이내 유지를 정량 목표로 하는 절대 yaw 융합 전처리를 우선적 해결 방향으로 제시한다.
+
+\bibliographystyle{ieeetr}
+\bibliography{refs}
+
+\end{document}
