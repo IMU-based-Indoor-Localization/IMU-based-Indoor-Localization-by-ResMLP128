@@ -106,7 +106,7 @@ push(P("RONIN[3]은 단말 자세로 IMU를 중력 기준 안정화 좌표계(he
 // ---- 3. 제안 방법 ----
 push(H(3,"제안 방법"));
 push(SH("3.1 시스템 설계"));
-push(P("제안 시스템은 (1) 전처리, (2) 변위·불확실성·휴대 상태를 동시 예측하는 1D-ResMLP128 다중 헤드 신경망, (3) 출력을 누적하는 상태 추정기로 구성된다(그림 1). 학습은 OxIOD(iPhone)[4] 기반이며 추론은 PyTorch Mobile 모델이 단말에서 실행한다. iPhone 학습 모델과 Android 단말의 도메인 차이로 EKF 경로가 발산해, 단말 기본 동작은 RotVec dead-reckoning 경로로 운용된다. 구현된 온디바이스 앱은 단말에서 실시간으로 측위 궤적을 표시하며, 윈도우당 추론 지연은 약 13 ms로 100 Hz 입력에 대해 실시간으로 동작한다(그림 2)."));
+push(P("제안 시스템은 (1) 전처리, (2) 변위·불확실성·휴대 상태를 동시 예측하는 1D-ResMLP128 다중 헤드 신경망, (3) 출력을 누적하는 상태 추정기로 구성된다(그림 1). 학습은 OxIOD(iPhone)[4] 기반이며 추론은 PyTorch Mobile 모델이 단말에서 실행한다. iPhone 학습 모델과 Android 단말의 도메인 차이로 EKF 경로가 발산해, 단말 기본 동작은 RotVec dead-reckoning 경로로 운용된다. 아울러 코드 상 EKF 결합보다 네트워크 단독이 우수한 상태(handbag·handheld·pocket·running·slow walking·multi_devices·multi_users·large_scale)를 NETWORK_ONLY_STATES로 지정해 EKF 갱신을 건너뛰고 변위 누적으로 자동 전환하며, trolley만 EKF 경로를 유지한다(4.4절 결과를 배포 구성에 직접 반영). 구현된 온디바이스 앱은 단말에서 실시간으로 측위 궤적을 표시하며, 윈도우당 추론 지연은 약 13 ms로 100 Hz 입력에 대해 실시간으로 동작한다(그림 2)."));
 push(imgPara("fig1_pipeline.png", 540));
 push(CAP("그림 1. 시스템 파이프라인 블록도: 전처리 → 1D-ResMLP128 백본 → 다중 헤드 → 상태 추정기."));
 push(imgPara("fig_app.png", 480));
@@ -126,10 +126,11 @@ push(P("",{after:80}));
 push(SH("3.3 전처리"));
 push(P("전처리는 바이어스 영점 보정, 중력 정렬 좌표 변환, 채널별 정규화로 구성된다. (1) 시작 약 2초 정지 구간 평균을 바이어스로 차감한다."));
 push(EQ("b_a = (1/N_c) Σ a^lin_t ,   b_ω = (1/N_c) Σ ω_t","1"));
-push(P("(2) 각 시각 자세 q_t로 body→world 회전 후 윈도우 시작 yaw ψ₀만 제거한다."));
+push(P("(2) 각 시각 자세 q_t(학습·평가 시 OxIOD GT 쿼터니언, 배포 시 단말 AHRS 출력으로 대체되며 이 소스 차이가 학습–배포 도메인 갭의 한 원인)로 body→world 회전 후 윈도우 시작 yaw ψ₀만 제거한다."));
 push(EQ("a^ga_t = R_z(ψ₀)⁻¹ R(q_t) a_t ,   ω^ga_t = R_z(ψ₀)⁻¹ R(q_t) ω_t","2"));
 push(P("이는 기울기 무관 표현과 절대 방위 불변(heading-agnostic) 입력을 동시 제공한다. ablation(4.6절)에 따르면 시간적 입도 차이는 1.08배로 작고, 품질을 지배하는 것은 중력 정렬의 존재(생략 시 2.44배 악화)와 입력 좌표계 절대 yaw 안정성이다. (3) 채널별 표준화."));
 push(EQ("ũ_t = (u_t − μ_norm) ⊘ σ_norm","3"));
+push(P("채널 배열은 [가속도 3채널, 자이로 3채널] 순이다. 노이즈 감소를 위한 5 Hz Butterworth 저역통과 필터도 검토하였으나 학습 데이터 스펙트럼과 어긋나 측위 오차가 악화되어 최종 파이프라인에서 제외하였다."));
 
 push(SH("3.4 회귀 헤드: 변위·불확실성"));
 push(P("특징 h∈R¹²⁸로부터 변위 평균 μ∈R³과 대각 로그 분산 logσ²를 산출하고 공분산을 복원한다."));
@@ -145,11 +146,14 @@ push(EQ("w_c ∝ 1/√n_c ,   L_cls = − Σ w_c y_c log p_c","8"));
 push(P("배포 변위 모델은 순수 회귀로 운용되며 분류 헤드는 별도 학습한 독립 분류기다."));
 
 push(SH("3.6 상태 추정기: SC-EKF"));
-push(P("확률적 클로닝 EKF[8,9]로 15차원 오차 상태와 윈도우 경계 클론을 추정한다. 예측 측정값과 노이즈 공분산은 다음과 같다."));
-push(EQ("ẑ = R_z(ψ_b)ᵀ (p_e − p_b)","9"));
-push(EQ("R = s · Σ ,   s = meascov_scale","10"));
-push(EQ("S = HΣHᵀ + R ,  K = ΣHᵀS⁻¹ ,  δx = K r","11"));
-push(EQ("Σ⁺ = (I−KH)Σ(I−KH)ᵀ + KRKᵀ","12"));
+push(P("확률적 클로닝 EKF[8,9]로 15차원 오차 상태와 윈도우 경계 클론을 추정한다. 예측 단계의 IMU 과정 잡음 공분산 W와 바이어스 랜덤워크 공분산 Q는 대각 행렬이다."));
+push(EQ("W = diag( σ_ng², σ_ng², σ_ng², σ_na², σ_na², σ_na² )","9a"));
+push(EQ("Q = diag( ι_bg², ι_bg², ι_bg², ι_ba², ι_ba², ι_ba² )","9b"));
+push(P("기본값은 σ_na = √(10⁻³) ≈ 0.032 m/s²/√Hz, σ_ng = √(10⁻⁴) = 0.01 rad/s/√Hz이며 바이어스는 랜덤워크(상수 확산 계수) 모델을 따른다. 예측 측정값과 노이즈 공분산은 다음과 같다."));
+push(EQ("ẑ = R_z(ψ_b)ᵀ (p_e − p_b)","10"));
+push(EQ("R = s · Σ ,   s = meascov_scale","11"));
+push(EQ("S = HΣHᵀ + R ,  K = ΣHᵀS⁻¹ ,  δx = K r","12"));
+push(EQ("Σ⁺ = (I−KH)Σ(I−KH)ᵀ + KRKᵀ","13"));
 push(P("서론의 가변 파라미터 접근은 바로 s를 휴대 상태에 따라 조정하려는 시도였다."));
 
 push(SH("3.7 학습 설정"));
@@ -170,8 +174,8 @@ push(P("",{after:80}));
 push(H(4,"실험"));
 push(SH("4.1 실험 설정"));
 push(P("OxIOD(train 122/val 15/test 15)와 TLIO golden으로 학습한 모델을 대상으로, 비겹침 앵커 위치의 2차원 RMSE로 측정한다."));
-push(EQ("RMSE_XY = √( (1/N) Σ ||p̂_xy − p_xy,GT||² )","13"));
-push(P("EKF는 카테고리별 meascov_scale을 [0.001,…,10.0]에서 그리드 서치한다. 이는 평가 시퀀스 오차를 직접 최소화하는 사후(oracle) 최적화로 EKF에 유리한 관대한 상한이며, 그럼에도 트롤리 외 전 카테고리에서 네트워크 단독에 열등하다. 평가는 카테고리당 최장 시퀀스 1개로 수행한다."));
+push(EQ("RMSE_XY = √( (1/N) Σ ||p̂_xy − p_xy,GT||² )","14"));
+push(P("RMSE_XY는 시작점을 고정한 alignment-free 절대 위치 오차로, SE(3) 최적 정렬 후 잔차를 산출하는 엄밀한 ATE(Absolute Trajectory Error)와는 구별되며 그에 준하는 누적 궤적 오차다. 평가에 포함된 large_scale은 학습 6개 카테고리(handbag~trolley)와 독립된 평가 전용 시퀀스 그룹(oxford_large_scale_*, 분류기 state_id=9)으로 학습 분포 외(OOD) 장거리 시나리오를 대표한다. EKF는 카테고리별 meascov_scale을 [0.001,…,10.0]에서 그리드 서치한다. 이는 평가 시퀀스 오차를 직접 최소화하는 사후(oracle) 최적화로 EKF에 유리한 관대한 상한이며, 그럼에도 트롤리 외 전 카테고리에서 네트워크 단독에 열등하다. 한편 oracle 스케일은 단일 평가 시퀀스 최소화 값으로, 배포 코드 운용값(예: trolley meascov_scale=0.02)은 다시퀀스 로버스트 운용을 위한 값이어서 목적이 다르다. 평가는 카테고리당 최장 시퀀스 1개로 수행한다."));
 
 push(SH("4.2 변위 회귀 성능"));
 push(P("약 460K 동급에서 ResMLP128이 ResNet1D-Small보다 Test RMSE 0.021 m 우수하고, 10배 큰 Full과의 차이도 0.014 m에 불과하다(표 3, 그림 3)."));
